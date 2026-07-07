@@ -22,6 +22,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { getPresencePlayers, hasRealtimeConfig, supabase } from './lib/supabase';
 
 const QUESTIONS = [
   { category: 'Physics', q: 'A car travels 120 km in 2 hours. What is its average speed?', choices: ['40 km/h', '60 km/h', '80 km/h', '240 km/h'], answer: 1 },
@@ -39,7 +40,11 @@ const LEADERS = [
   { rank: 5, name: 'BioBoss', xp: '15,997', streak: 4, color: '#ff7ca8' },
 ];
 
-const OPPONENTS = ['QuantumQuinn', 'AstroAce', 'NeuronNinja', 'LabLegend'];
+const LOBBY_CHANNEL = 'stemegle:lobby:v1';
+
+function createPlayerId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
@@ -112,79 +117,237 @@ function EntryModal({ mode, onClose, onStart }) {
 function Matchmaking({ name, onMatched, onCancel }) {
   const [secondsWaiting, setSecondsWaiting] = useState(0);
   const [opponentOnline, setOpponentOnline] = useState(false);
+  const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'configuration-error');
+  const [error, setError] = useState('');
+  const playerId = useRef(createPlayerId());
 
   useEffect(() => {
     const waitTicker = setInterval(() => setSecondsWaiting((seconds) => seconds + 1), 1000);
+    if (!hasRealtimeConfig) return () => clearInterval(waitTicker);
 
-    // Demo presence event. In production, the matchmaker should trigger this
-    // only after the realtime backend reports another queued player.
-    let matchTimer;
-    const presenceTimer = setTimeout(() => {
+    let active = true;
+    let lobbyChannel;
+    let matchChannel;
+    let joinedMatch = false;
+    let startSent = false;
+
+    const joinPairChannel = (players) => {
+      if (!active || matchChannel) return;
+
+      const orderedPair = [...players].sort((a, b) => a.playerId.localeCompare(b.playerId));
+      const opponent = orderedPair.find((candidate) => candidate.playerId !== playerId.current);
+      const matchId = orderedPair.map((candidate) => candidate.playerId).join('--');
+      const isHost = orderedPair[0].playerId === playerId.current;
+      const eventListeners = new Set();
+      const events = {
+        subscribe(listener) {
+          eventListeners.add(listener);
+          return () => eventListeners.delete(listener);
+        },
+        emit(event, payload) {
+          eventListeners.forEach((listener) => listener(event, payload));
+        },
+      };
+
       setOpponentOnline(true);
-      matchTimer = setTimeout(
-        () => onMatched(OPPONENTS[Math.floor(Math.random() * OPPONENTS.length)]),
-        1200,
-      );
-    }, 5000);
+      setStatus('opponent-found');
+
+      matchChannel = supabase.channel(`stemegle:match:${matchId}`, {
+        config: {
+          presence: { key: playerId.current },
+          broadcast: { self: true, ack: true },
+        },
+      });
+
+      matchChannel
+        .on('broadcast', { event: 'start' }, async ({ payload }) => {
+          if (!active || joinedMatch) return;
+          joinedMatch = true;
+          await lobbyChannel.untrack();
+          await supabase.removeChannel(lobbyChannel);
+          onMatched({
+            id: matchId,
+            channel: matchChannel,
+            events,
+            playerId: playerId.current,
+            opponent: { id: opponent.playerId, name: opponent.name },
+            startsAt: payload.startsAt,
+          });
+        })
+        .on('broadcast', { event: 'score' }, ({ payload }) => events.emit('score', payload))
+        .on('broadcast', { event: 'finish' }, ({ payload }) => events.emit('finish', payload))
+        .on('presence', { event: 'sync' }, () => {
+          const matchPlayers = getPresencePlayers(matchChannel);
+          events.emit('presence', matchPlayers);
+          if (matchPlayers.length === 2 && isHost && !startSent) {
+            startSent = true;
+            matchChannel.send({
+              type: 'broadcast',
+              event: 'start',
+              payload: { startsAt: Date.now() + 1800 },
+            });
+          }
+        })
+        .subscribe(async (subscriptionStatus) => {
+          if (subscriptionStatus === 'SUBSCRIBED') {
+            await matchChannel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+          }
+          if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
+            setError('The live match connection failed. Please try again.');
+            setStatus('error');
+          }
+        });
+    };
+
+    lobbyChannel = supabase.channel(LOBBY_CHANNEL, {
+      config: { presence: { key: playerId.current } },
+    });
+
+    lobbyChannel
+      .on('presence', { event: 'sync' }, () => {
+        if (!active || matchChannel) return;
+        const players = getPresencePlayers(lobbyChannel)
+          .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+        const ownIndex = players.findIndex((candidate) => candidate.playerId === playerId.current);
+        const partnerIndex = ownIndex % 2 === 0 ? ownIndex + 1 : ownIndex - 1;
+        const opponent = players[partnerIndex];
+
+        setOpponentOnline(Boolean(opponent));
+        setStatus(opponent ? 'opponent-found' : 'waiting');
+        if (opponent) joinPairChannel([players[ownIndex], opponent]);
+      })
+      .subscribe(async (subscriptionStatus) => {
+        if (subscriptionStatus === 'SUBSCRIBED') {
+          setStatus('waiting');
+          await lobbyChannel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+        }
+        if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
+          setError('Unable to reach the multiplayer lobby. Check your connection and try again.');
+          setStatus('error');
+        }
+      });
 
     return () => {
+      active = false;
       clearInterval(waitTicker);
-      clearTimeout(presenceTimer);
-      clearTimeout(matchTimer);
+      if (lobbyChannel) {
+        lobbyChannel.untrack();
+        supabase.removeChannel(lobbyChannel);
+      }
+      if (matchChannel && !joinedMatch) {
+        matchChannel.untrack();
+        supabase.removeChannel(matchChannel);
+      }
     };
-  }, [onMatched]);
+  }, [name, onMatched]);
 
-  const progress = opponentOnline ? 100 : Math.min(22 + secondsWaiting * 9, 76);
+  const progress = opponentOnline ? 100 : Math.min(18 + secondsWaiting * 3, 76);
+  const connecting = status === 'connecting';
+  const hasError = status === 'error' || status === 'configuration-error';
 
   return (
     <main className="game-shell matchmaking-screen">
       <Logo />
       <div className="radar"><span className="radar-ring r1" /><span className="radar-ring r2" /><span className="radar-ring r3" /><span className="radar-sweep" /><span className="avatar avatar-you radar-avatar">{name[0].toUpperCase()}</span></div>
-      <p className="eyebrow"><i className="status-dot" /> {opponentOnline ? 'OPPONENT ONLINE' : 'YOU’RE IN THE QUEUE'}</p>
-      <h1>{opponentOnline ? 'Opponent found!' : 'Waiting for a rival...'}</h1>
-      <p>{opponentOnline ? 'Locking in your live match' : 'You’ll be matched as soon as another player comes online'}</p>
+      <p className="eyebrow"><i className="status-dot" /> {hasError ? 'CONNECTION NEEDED' : opponentOnline ? 'OPPONENT ONLINE' : connecting ? 'CONNECTING LIVE' : 'YOU’RE IN THE QUEUE'}</p>
+      <h1>{hasError ? 'Multiplayer is offline' : opponentOnline ? 'Opponent found!' : connecting ? 'Joining the lobby...' : 'Waiting for a rival...'}</h1>
+      <p>{hasError ? error || 'Supabase environment variables are missing from this deployment.' : opponentOnline ? 'Both players are connected. Your match is starting.' : 'You’ll be matched as soon as another real player comes online'}</p>
       <div className="search-progress"><i style={{ width: `${progress}%` }} /></div>
       <div className="match-stats">
-        <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? '1 opponent available' : '0 opponents available'}</span>
+        <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? 'Rival connected' : 'Waiting for another player'}</span>
         <span><Clock3 /> Waiting {secondsWaiting}s</span>
       </div>
-      {!opponentOnline && <p className="queue-note">You’re first in line. Keep this tab open.</p>}
+      {!opponentOnline && !hasError && <p className="queue-note">Keep this tab open. We only start when two players are connected.</p>}
       <button className="text-button" onClick={onCancel}>Cancel search</button>
     </main>
   );
 }
 
-function Game({ player, opponent, onFinish }) {
+function Game({ player, match, onFinish, onExit }) {
   const [questionIndex, setQuestionIndex] = useState(0);
   const [time, setTime] = useState(15);
   const [score, setScore] = useState(0);
   const [opponentScore, setOpponentScore] = useState(0);
   const [selected, setSelected] = useState(null);
   const [feedback, setFeedback] = useState('');
+  const [started, setStarted] = useState(Date.now() >= match.startsAt);
+  const [opponentFinished, setOpponentFinished] = useState(false);
+  const [opponentConnected, setOpponentConnected] = useState(true);
   const transitionTimer = useRef(null);
+  const localFinal = useRef(null);
+  const remoteFinal = useRef(null);
+  const deliveredResult = useRef(false);
+  const opponentScoreRef = useRef(0);
   const question = QUESTIONS[questionIndex];
+  const opponent = match.opponent.name;
+
+  const deliverResult = useCallback((localScore, remoteScore) => {
+    if (deliveredResult.current || localScore === null || remoteScore === null) return;
+    deliveredResult.current = true;
+    onFinish({ score: localScore, opponentScore: remoteScore });
+  }, [onFinish]);
+
+  const finishLocal = useCallback((finalScore) => {
+    if (localFinal.current !== null) return;
+    localFinal.current = finalScore;
+    setFeedback(remoteFinal.current === null ? 'Finished! Waiting for your rival…' : 'Match complete!');
+    match.channel.send({
+      type: 'broadcast',
+      event: 'finish',
+      payload: { playerId: match.playerId, score: finalScore },
+    });
+    deliverResult(finalScore, remoteFinal.current);
+  }, [deliverResult, match.channel, match.playerId]);
 
   const advance = useCallback((finalScore) => {
-    const rivalGain = 520 + Math.floor(Math.random() * 480);
-    const nextRival = opponentScore + rivalGain;
     if (questionIndex === QUESTIONS.length - 1) {
-      onFinish({ score: finalScore, opponentScore: nextRival });
+      finishLocal(finalScore);
       return;
     }
-    setOpponentScore(nextRival);
     setQuestionIndex((i) => i + 1);
     setTime(15);
     setSelected(null);
     setFeedback('');
-  }, [onFinish, opponentScore, questionIndex]);
-
-  useEffect(() => () => clearTimeout(transitionTimer.current), []);
+  }, [finishLocal, questionIndex]);
 
   useEffect(() => {
-    if (selected !== null) return undefined;
+    const delay = Math.max(0, match.startsAt - Date.now());
+    const startTimer = setTimeout(() => setStarted(true), delay);
+
+    const unsubscribe = match.events.subscribe((event, payload) => {
+      if (event === 'score') {
+        if (payload.playerId === match.playerId) return;
+        opponentScoreRef.current = payload.score;
+        setOpponentScore(payload.score);
+      }
+      if (event === 'finish') {
+        if (payload.playerId === match.playerId) return;
+        remoteFinal.current = payload.score;
+        opponentScoreRef.current = payload.score;
+        setOpponentScore(payload.score);
+        setOpponentFinished(true);
+        deliverResult(localFinal.current, payload.score);
+      }
+      if (event === 'presence') {
+        const players = payload;
+        setOpponentConnected(players.some((candidate) => candidate.playerId === match.opponent.id));
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      clearTimeout(startTimer);
+      clearTimeout(transitionTimer.current);
+      match.channel.untrack();
+      supabase.removeChannel(match.channel);
+    };
+  }, [deliverResult, match]);
+
+  useEffect(() => {
+    if (!started || selected !== null || localFinal.current !== null) return undefined;
     const timer = setInterval(() => setTime((t) => Math.max(0, +(t - 0.1).toFixed(1))), 100);
     return () => clearInterval(timer);
-  }, [questionIndex, selected]);
+  }, [questionIndex, selected, started]);
 
   useEffect(() => {
     if (time > 0 || selected !== null) return;
@@ -194,23 +357,28 @@ function Game({ player, opponent, onFinish }) {
   }, [advance, score, selected, time]);
 
   function choose(index) {
-    if (selected !== null) return;
+    if (!started || selected !== null || localFinal.current !== null) return;
     setSelected(index);
     const correct = index === question.answer;
     const gain = correct ? 500 + Math.round(time * 45) : 0;
     const nextScore = score + gain;
     setScore(nextScore);
     setFeedback(correct ? `Correct! +${gain}` : 'Not quite!');
+    match.channel.send({
+      type: 'broadcast',
+      event: 'score',
+      payload: { playerId: match.playerId, score: nextScore, questionIndex },
+    });
     transitionTimer.current = setTimeout(() => advance(nextScore), 850);
   }
 
   return (
     <main className="game-shell arena">
-      <div className="game-header"><Logo /><span className="round-label">RANKED · ROUND {questionIndex + 1}/{QUESTIONS.length}</span><button className="icon-button" aria-label="Exit game" onClick={() => onFinish({ score, opponentScore })}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{QUESTIONS.length}</span><button className="icon-button" aria-label="Exit game" onClick={onExit}><X /></button></div>
       <div className="scoreboard">
         <div className="game-player"><span className="avatar avatar-you">{player[0].toUpperCase()}</span><div><small>YOU</small><strong>{player}</strong></div><b>{score.toLocaleString()}</b></div>
         <div className="vs-badge">VS</div>
-        <div className="game-player rival"><b>{opponentScore.toLocaleString()}</b><div><small>RIVAL</small><strong>{opponent}</strong></div><span className="avatar avatar-nova">{opponent[0]}</span></div>
+        <div className="game-player rival"><b>{opponentScore.toLocaleString()}</b><div><small>{opponentFinished ? 'FINISHED' : opponentConnected ? 'RIVAL · LIVE' : 'RECONNECTING'}</small><strong>{opponent}</strong></div><span className="avatar avatar-nova">{opponent[0]}</span></div>
       </div>
       <div className="game-progress"><i style={{ width: `${((questionIndex + 1) / QUESTIONS.length) * 100}%` }} /></div>
       <section className="question-card">
@@ -221,10 +389,11 @@ function Game({ player, opponent, onFinish }) {
             let state = '';
             if (selected !== null && index === question.answer) state = 'correct';
             else if (selected === index) state = 'wrong';
-            return <button className={state} key={choice} onClick={() => choose(index)} disabled={selected !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
+            return <button className={state} key={choice} onClick={() => choose(index)} disabled={!started || selected !== null || localFinal.current !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
           })}
         </div>
         <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || 'placeholder'}</div>
+        {!started && <div className="match-countdown"><span>RIVAL CONNECTED</span><strong>Get ready…</strong></div>}
       </section>
     </main>
   );
@@ -257,7 +426,7 @@ function Landing({ onGuest, onCreate }) {
       <main>
         <section className="hero">
           <div className="hero-copy">
-            <div className="social-proof"><span className="proof-faces"><i>N</i><i>Q</i><i>A</i></span><span><b>2,481</b> minds battling now</span></div>
+            <div className="social-proof"><span className="proof-faces"><i>N</i><i>Q</i><i>A</i></span><span><b>Live</b> matchmaking is online</span></div>
             <p className="eyebrow">REAL-TIME STEM SHOWDOWNS</p>
             <h1>Think fast.<br />Win <em>faster.</em></h1>
             <p className="hero-sub">Go head-to-head in rapid-fire STEM battles. Outsmart real opponents, climb the universal ranks, and prove your brain has game.</p>
@@ -300,16 +469,17 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [player, setPlayer] = useState('');
   const [opponent, setOpponent] = useState('');
+  const [match, setMatch] = useState(null);
   const [result, setResult] = useState(null);
-  const handleMatched = useCallback((name) => { setOpponent(name); setScreen('game'); }, []);
+  const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
   const handleFinish = useCallback((data) => { setResult(data); setScreen('results'); }, []);
 
   function start(name) { setPlayer(name); setModal(null); setScreen('matchmaking'); }
-  function rematch() { setResult(null); setScreen('matchmaking'); }
-  function home() { setScreen('landing'); setResult(null); setOpponent(''); }
+  function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
+  function home() { setScreen('landing'); setResult(null); setMatch(null); setOpponent(''); }
 
   if (screen === 'matchmaking') return <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
-  if (screen === 'game') return <Game player={player} opponent={opponent} onFinish={handleFinish} />;
+  if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <><Landing onGuest={() => setModal('guest')} onCreate={() => setModal('create')} />{modal && <EntryModal mode={modal} onClose={() => setModal(null)} onStart={start} />}</>;
 }
