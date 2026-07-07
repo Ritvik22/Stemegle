@@ -24,3 +24,23 @@ export function getPresencePlayers(channel) {
     .flat()
     .filter((presence) => presence?.playerId && presence?.name);
 }
+
+export async function fetchGamesPlayed() {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase
+      .from('global_stats')
+      .select('value')
+      .eq('key', 'games_played')
+      .single();
+    if (error) return null;
+    return data?.value ?? null;
+  } catch { return null; }
+}
+
+export async function incrementGamesPlayed() {
+  if (!supabase) return;
+  try {
+    await supabase.rpc('increment_games_played');
+  } catch { /* table may not exist yet */ }
+}

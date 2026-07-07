@@ -24,7 +24,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { getPresencePlayers, hasRealtimeConfig, supabase } from './lib/supabase';
+import { fetchGamesPlayed, getPresencePlayers, hasRealtimeConfig, incrementGamesPlayed, supabase } from './lib/supabase';
 import { getQuestionsForMatch } from './data/questions';
 
 const LEADERS = [
@@ -36,6 +36,60 @@ const LEADERS = [
 ];
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
+
+const VISITOR_ID = (() => {
+  const key = 'stemegle_vid';
+  const existing = sessionStorage.getItem(key);
+  if (existing) return existing;
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  sessionStorage.setItem(key, id);
+  return id;
+})();
+
+function useLiveStats() {
+  const [onlineCount, setOnlineCount] = useState(null);
+  const [gamesPlayed, setGamesPlayed] = useState(null);
+
+  useEffect(() => {
+    if (!supabase) return undefined;
+
+    fetchGamesPlayed().then((count) => { if (count !== null) setGamesPlayed(count); });
+
+    const visitorsChannel = supabase.channel('stemegle:visitors', {
+      config: { presence: { key: VISITOR_ID } },
+    });
+
+    visitorsChannel
+      .on('presence', { event: 'sync' }, () => {
+        setOnlineCount(Object.keys(visitorsChannel.presenceState()).length);
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await visitorsChannel.track({ joinedAt: Date.now() });
+        }
+      });
+
+    const statsChannel = supabase
+      .channel('stemegle:global-stats')
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'global_stats',
+        filter: 'key=eq.games_played',
+      }, (payload) => {
+        setGamesPlayed(payload.new.value);
+      })
+      .subscribe();
+
+    return () => {
+      visitorsChannel.untrack();
+      supabase.removeChannel(visitorsChannel);
+      supabase.removeChannel(statsChannel);
+    };
+  }, []);
+
+  return { onlineCount, gamesPlayed };
+}
 
 function createPlayerId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -536,7 +590,7 @@ function Results({ player, opponent, result, onRematch, onHome }) {
   );
 }
 
-function Landing({ accountName, authNotice, onNoticeClose, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPlayed, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
@@ -544,7 +598,11 @@ function Landing({ accountName, authNotice, onNoticeClose, onGuest, onCreate, on
       <main>
         <section className="hero">
           <div className="hero-copy">
-            <div className="social-proof"><span className="proof-faces"><i>N</i><i>Q</i><i>A</i></span><span><b>Live</b> matchmaking is online</span></div>
+            <div className="social-proof">
+              <span className="proof-faces"><i>N</i><i>Q</i><i>A</i></span>
+              <span>{onlineCount !== null ? <><b>{onlineCount.toLocaleString()}</b> online now</> : <><b>Live</b> matchmaking is online</>}</span>
+              {gamesPlayed !== null && <span className="games-played-chip"><Zap size={12} /> <b>{gamesPlayed.toLocaleString()}</b> games played</span>}
+            </div>
             <p className="eyebrow">REAL-TIME STEM SHOWDOWNS</p>
             <h1>Think fast.<br />Win <em>faster.</em></h1>
             <p className="hero-sub">Go head-to-head in rapid-fire STEM battles. Outsmart real opponents, climb the universal ranks, and prove your brain has game.</p>
@@ -614,6 +672,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
+  const { onlineCount, gamesPlayed } = useLiveStats();
   const fromConfirmLink = useRef(
     window.location.hash.includes('access_token') ||
     Boolean(new URLSearchParams(window.location.search).get('code'))
@@ -624,6 +683,7 @@ export default function App() {
     const matchStats = recordMatch(won, data.score);
     setResult({ ...data, matchStats });
     setScreen('results');
+    incrementGamesPlayed();
   }, []);
 
   useEffect(() => {
@@ -670,7 +730,7 @@ export default function App() {
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <>
-    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
     {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 }
