@@ -2,6 +2,8 @@
 
 Fast, competitive STEM battles for curious minds. Players can enter as a named guest, match with another online player, answer timed STEM questions, and compete live for score, XP, streaks, and universal rank.
 
+The question bank contains 120 questions across mathematics, physics, chemistry, biology, space, computing, and engineering. Each match deterministically selects five different categories so both live players receive the same set.
+
 ## Run locally
 
 ```bash

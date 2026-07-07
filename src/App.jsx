@@ -23,14 +23,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { getPresencePlayers, hasRealtimeConfig, supabase } from './lib/supabase';
-
-const QUESTIONS = [
-  { category: 'Physics', q: 'A car travels 120 km in 2 hours. What is its average speed?', choices: ['40 km/h', '60 km/h', '80 km/h', '240 km/h'], answer: 1 },
-  { category: 'Biology', q: 'Which organelle is known as the powerhouse of the cell?', choices: ['Nucleus', 'Ribosome', 'Mitochondrion', 'Golgi body'], answer: 2 },
-  { category: 'Mathematics', q: 'What is the next prime number after 19?', choices: ['20', '21', '23', '29'], answer: 2 },
-  { category: 'Chemistry', q: 'What is the chemical symbol for gold?', choices: ['Ag', 'Gd', 'Go', 'Au'], answer: 3 },
-  { category: 'Space', q: 'Which planet has the shortest year?', choices: ['Mercury', 'Venus', 'Mars', 'Jupiter'], answer: 0 },
-];
+import { getQuestionsForMatch } from './data/questions';
 
 const LEADERS = [
   { rank: 1, name: 'NovaNerd', xp: '18,942', streak: 14, color: '#b7ff5a' },
@@ -105,9 +98,11 @@ function EntryModal({ mode, onClose, onStart }) {
         <p className="eyebrow">{isGuest ? 'QUICK PLAY' : 'JOIN THE LEAGUE'}</p>
         <h2 id="entry-title">{isGuest ? 'Choose your battle name' : 'Create your contender'}</h2>
         <p>{isGuest ? 'No account, no fuss. Pick a name and jump straight into a match.' : 'Save your rank, build streaks, and climb the universal leaderboard.'}</p>
-        <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} /></label>
-        {!isGuest && <label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></label>}
-        <button className="button button-wide" disabled={!valid} onClick={() => onStart(name.trim())}>{isGuest ? 'Find an opponent' : 'Create & play'} <ArrowRight size={18} /></button>
+        <form onSubmit={(event) => { event.preventDefault(); if (valid) onStart(name.trim()); }}>
+          <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} /></label>
+          {!isGuest && <label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></label>}
+          <button type="submit" className="button button-wide" disabled={!valid}>{isGuest ? 'Find an opponent' : 'Create & play'} <ArrowRight size={18} /></button>
+        </form>
         <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'No spam. Just scores, streaks, and science.'}</small>
       </div>
     </div>
@@ -264,6 +259,7 @@ function Matchmaking({ name, onMatched, onCancel }) {
 }
 
 function Game({ player, match, onFinish, onExit }) {
+  const questions = useRef(getQuestionsForMatch(match.id)).current;
   const [questionIndex, setQuestionIndex] = useState(0);
   const [time, setTime] = useState(15);
   const [score, setScore] = useState(0);
@@ -278,8 +274,27 @@ function Game({ player, match, onFinish, onExit }) {
   const remoteFinal = useRef(null);
   const deliveredResult = useRef(false);
   const opponentScoreRef = useRef(0);
-  const question = QUESTIONS[questionIndex];
+  const question = questions[questionIndex];
   const opponent = match.opponent.name;
+
+  useEffect(() => {
+    const renderGameState = () => JSON.stringify({
+      mode: 'live-match',
+      player: { name: player, score },
+      opponent: { name: opponent, score: opponentScore, connected: opponentConnected },
+      round: questionIndex + 1,
+      totalRounds: questions.length,
+      question: question.q,
+      category: question.category,
+      choices: question.choices,
+      secondsRemaining: time,
+      answerLocked: selected !== null,
+    });
+    window.render_game_to_text = renderGameState;
+    return () => {
+      if (window.render_game_to_text === renderGameState) delete window.render_game_to_text;
+    };
+  }, [opponent, opponentConnected, opponentScore, player, question, questionIndex, questions.length, score, selected, time]);
 
   const deliverResult = useCallback((localScore, remoteScore) => {
     if (deliveredResult.current || localScore === null || remoteScore === null) return;
@@ -300,7 +315,7 @@ function Game({ player, match, onFinish, onExit }) {
   }, [deliverResult, match.channel, match.playerId]);
 
   const advance = useCallback((finalScore) => {
-    if (questionIndex === QUESTIONS.length - 1) {
+    if (questionIndex === questions.length - 1) {
       finishLocal(finalScore);
       return;
     }
@@ -308,7 +323,7 @@ function Game({ player, match, onFinish, onExit }) {
     setTime(15);
     setSelected(null);
     setFeedback('');
-  }, [finishLocal, questionIndex]);
+  }, [finishLocal, questionIndex, questions.length]);
 
   useEffect(() => {
     const delay = Math.max(0, match.startsAt - Date.now());
@@ -374,13 +389,13 @@ function Game({ player, match, onFinish, onExit }) {
 
   return (
     <main className="game-shell arena">
-      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{QUESTIONS.length}</span><button className="icon-button" aria-label="Exit game" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{questions.length}</span><button className="icon-button" aria-label="Exit game" onClick={onExit}><X /></button></div>
       <div className="scoreboard">
         <div className="game-player"><span className="avatar avatar-you">{player[0].toUpperCase()}</span><div><small>YOU</small><strong>{player}</strong></div><b>{score.toLocaleString()}</b></div>
         <div className="vs-badge">VS</div>
         <div className="game-player rival"><b>{opponentScore.toLocaleString()}</b><div><small>{opponentFinished ? 'FINISHED' : opponentConnected ? 'RIVAL · LIVE' : 'RECONNECTING'}</small><strong>{opponent}</strong></div><span className="avatar avatar-nova">{opponent[0]}</span></div>
       </div>
-      <div className="game-progress"><i style={{ width: `${((questionIndex + 1) / QUESTIONS.length) * 100}%` }} /></div>
+      <div className="game-progress"><i style={{ width: `${((questionIndex + 1) / questions.length) * 100}%` }} /></div>
       <section className="question-card">
         <div className="question-meta"><span><BrainCircuit size={15} /> {question.category.toUpperCase()}</span><span className={time < 5 ? 'timer timer-low' : 'timer'}><Clock3 size={17} /> {time.toFixed(1)}s</span></div>
         <h1>{question.q}</h1>
@@ -473,6 +488,19 @@ export default function App() {
   const [result, setResult] = useState(null);
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
   const handleFinish = useCallback((data) => { setResult(data); setScreen('results'); }, []);
+
+  useEffect(() => {
+    const renderAppState = () => JSON.stringify({
+      mode: screen,
+      player: player || null,
+      opponent: opponent || null,
+      matchId: match?.id ?? null,
+    });
+    window.render_game_to_text = renderAppState;
+    return () => {
+      if (window.render_game_to_text === renderAppState) delete window.render_game_to_text;
+    };
+  }, [match?.id, opponent, player, screen]);
 
   function start(name) { setPlayer(name); setModal(null); setScreen('matchmaking'); }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
