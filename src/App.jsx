@@ -227,7 +227,6 @@ function Matchmaking({ name, onMatched, onCancel }) {
     let lobbyChannel;
     let matchChannel;
     let joinedMatch = false;
-    let startSent = false;
 
     const joinPairChannel = (players) => {
       if (!active || matchChannel) return;
@@ -277,8 +276,7 @@ function Matchmaking({ name, onMatched, onCancel }) {
         .on('presence', { event: 'sync' }, () => {
           const matchPlayers = getPresencePlayers(matchChannel);
           events.emit('presence', matchPlayers);
-          if (matchPlayers.length === 2 && isHost && !startSent) {
-            startSent = true;
+          if (matchPlayers.length === 2 && isHost && !joinedMatch) {
             matchChannel.send({
               type: 'broadcast',
               event: 'start',
@@ -519,6 +517,7 @@ function Game({ player, match, onFinish, onExit }) {
 
 function Results({ player, opponent, result, onRematch, onHome }) {
   const won = result.score >= result.opponentScore;
+  const { xpGained = 0, streak = 0, totalXp = 0 } = result.matchStats || {};
   return (
     <main className="game-shell results-screen">
       <Logo />
@@ -531,16 +530,17 @@ function Results({ player, opponent, result, onRematch, onHome }) {
         <span className="result-vs">{won ? 'WIN' : 'GG'}</span>
         <div><span className="avatar avatar-nova">{opponent[0]}</span><strong>{opponent}</strong><b>{result.opponentScore.toLocaleString()}</b></div>
       </div>
-      <div className="reward-row"><span><Zap /> +{won ? 84 : 32} XP</span><span><BarChart3 /> Rank #{won ? '12,481' : '12,533'}</span><span><Bolt /> {won ? '2' : '0'} streak</span></div>
+      <div className="reward-row"><span><Zap /> +{xpGained} XP</span><span><BarChart3 /> {totalXp.toLocaleString()} total XP</span><span><Bolt /> {streak} streak</span></div>
       <div className="result-actions"><button className="button" onClick={onRematch}><Play size={17} /> Play again</button><button className="button button-secondary" onClick={onHome}>Back home</button></div>
     </main>
   );
 }
 
-function Landing({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, authNotice, onNoticeClose, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
+      {authNotice && <div className="auth-notice" role="status">{authNotice}<button onClick={onNoticeClose} aria-label="Dismiss"><X size={16} /></button></div>}
       <main>
         <section className="hero">
           <div className="hero-copy">
@@ -585,6 +585,25 @@ function Landing({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountP
   );
 }
 
+function getStats() {
+  try { return JSON.parse(localStorage.getItem('stemegle_stats') || '{}'); }
+  catch { return {}; }
+}
+
+function recordMatch(won, score) {
+  const stats = getStats();
+  const xpGained = Math.round(score / 10) + (won ? 50 : 10);
+  const newStreak = won ? (stats.streak || 0) + 1 : 0;
+  const updated = {
+    xp: (stats.xp || 0) + xpGained,
+    streak: newStreak,
+    wins: (stats.wins || 0) + (won ? 1 : 0),
+    matches: (stats.matches || 0) + 1,
+  };
+  localStorage.setItem('stemegle_stats', JSON.stringify(updated));
+  return { xpGained, streak: newStreak, totalXp: updated.xp };
+}
+
 export default function App() {
   const [screen, setScreen] = useState('landing');
   const [modal, setModal] = useState(null);
@@ -594,8 +613,18 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
+  const [authNotice, setAuthNotice] = useState('');
+  const fromConfirmLink = useRef(
+    window.location.hash.includes('access_token') ||
+    Boolean(new URLSearchParams(window.location.search).get('code'))
+  );
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
-  const handleFinish = useCallback((data) => { setResult(data); setScreen('results'); }, []);
+  const handleFinish = useCallback((data) => {
+    const won = data.score >= data.opponentScore;
+    const matchStats = recordMatch(won, data.score);
+    setResult({ ...data, matchStats });
+    setScreen('results');
+  }, []);
 
   useEffect(() => {
     const renderAppState = () => JSON.stringify({
@@ -612,9 +641,17 @@ export default function App() {
 
   useEffect(() => {
     if (!supabase) return undefined;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       setAuthReady(true);
+      if (event === 'SIGNED_IN' && fromConfirmLink.current) {
+        fromConfirmLink.current = false;
+        const name = nextSession?.user?.user_metadata?.battle_name
+          || nextSession?.user?.email?.split('@')[0]
+          || 'Player';
+        setAuthNotice(`Email confirmed! You're now signed in as ${name}.`);
+        window.history.replaceState(null, '', window.location.pathname);
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
@@ -633,7 +670,7 @@ export default function App() {
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <>
-    <Landing accountName={authReady ? accountName : ''} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
     {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 }

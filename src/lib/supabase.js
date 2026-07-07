@@ -13,6 +13,7 @@ export const supabase = hasRealtimeConfig
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
+        flowType: 'implicit',
       },
       realtime: { params: { eventsPerSecond: 20 } },
     })
