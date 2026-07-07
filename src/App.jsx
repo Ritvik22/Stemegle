@@ -10,6 +10,8 @@ import {
   CircleUserRound,
   Clock3,
   Crown,
+  Eye,
+  EyeOff,
   FlaskConical,
   Globe2,
   Lock,
@@ -43,7 +45,7 @@ function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
 }
 
-function Header({ onGuest, onCreate }) {
+function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   const [open, setOpen] = useState(false);
   return (
     <header className="site-header">
@@ -51,8 +53,19 @@ function Header({ onGuest, onCreate }) {
       <nav className={open ? 'nav open' : 'nav'} aria-label="Main navigation">
         <a href="#how" onClick={() => setOpen(false)}>How it works</a>
         <a href="#leaderboard" onClick={() => setOpen(false)}>Leaderboard</a>
-        <button className="nav-login" onClick={onGuest}>Guest play</button>
-        <button className="button button-small" onClick={onCreate}>Create account <ArrowRight size={15} /></button>
+        {accountName ? (
+          <>
+            <span className="account-pill"><i>{accountName[0].toUpperCase()}</i><span><small>SIGNED IN</small>{accountName}</span></span>
+            <button className="nav-login" onClick={onLogout}>Log out</button>
+            <button className="button button-small" onClick={onAccountPlay}>Play now <ArrowRight size={15} /></button>
+          </>
+        ) : (
+          <>
+            <button className="nav-login" onClick={onLogin}>Log in</button>
+            <button className="nav-guest" onClick={onGuest}>Guest play</button>
+            <button className="button button-small" onClick={onCreate}>Create account <ArrowRight size={15} /></button>
+          </>
+        )}
       </nav>
       <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">{open ? <X /> : <Menu />}</button>
     </header>
@@ -84,26 +97,116 @@ function BattleCard() {
   );
 }
 
-function EntryModal({ mode, onClose, onStart }) {
+function EntryModal({ mode, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const isGuest = mode === 'guest';
-  const valid = isGuest ? name.trim().length >= 2 : name.trim().length >= 2 && email.includes('@');
+  const isLogin = mode === 'login';
+  const passwordStrong = password.length >= 8 && /[A-Za-z]/.test(password) && /\d/.test(password);
+  const valid = isGuest
+    ? name.trim().length >= 2
+    : isLogin
+      ? email.includes('@') && password.length > 0
+      : name.trim().length >= 2 && email.includes('@') && passwordStrong && password === confirmPassword;
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!valid || loading) return;
+    setError('');
+    setNotice('');
+
+    if (isGuest) {
+      onGuestStart(name.trim());
+      return;
+    }
+
+    if (!supabase) {
+      setError('Account services are not configured for this deployment.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      if (isLogin) {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        });
+        if (signInError) throw signInError;
+        onAuthSuccess();
+        return;
+      }
+
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+        options: {
+          data: { battle_name: name.trim() },
+          emailRedirectTo: window.location.origin,
+        },
+      });
+      if (signUpError) throw signUpError;
+      if (data.session) {
+        onAuthSuccess();
+      } else {
+        setNotice('Account created. Check your email to confirm it, then return and log in.');
+        setPassword('');
+        setConfirmPassword('');
+      }
+    } catch (authError) {
+      setError(authError?.message || 'Authentication failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function switchMode(nextMode) {
+    setName('');
+    setEmail('');
+    setPassword('');
+    setConfirmPassword('');
+    setShowPassword(false);
+    setError('');
+    setNotice('');
+    onSwitch(nextMode);
+  }
+
+  const title = isGuest ? 'Choose your battle name' : isLogin ? 'Welcome back' : 'Create your contender';
+  const eyebrow = isGuest ? 'QUICK PLAY' : isLogin ? 'PLAYER LOGIN' : 'JOIN THE LEAGUE';
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="entry-modal" role="dialog" aria-modal="true" aria-labelledby="entry-title">
         <button className="modal-close" onClick={onClose} aria-label="Close"><X size={20} /></button>
-        <span className="modal-icon">{isGuest ? <Play /> : <Rocket />}</span>
-        <p className="eyebrow">{isGuest ? 'QUICK PLAY' : 'JOIN THE LEAGUE'}</p>
-        <h2 id="entry-title">{isGuest ? 'Choose your battle name' : 'Create your contender'}</h2>
-        <p>{isGuest ? 'No account, no fuss. Pick a name and jump straight into a match.' : 'Save your rank, build streaks, and climb the universal leaderboard.'}</p>
-        <form onSubmit={(event) => { event.preventDefault(); if (valid) onStart(name.trim()); }}>
-          <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} /></label>
-          {!isGuest && <label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></label>}
-          <button type="submit" className="button button-wide" disabled={!valid}>{isGuest ? 'Find an opponent' : 'Create & play'} <ArrowRight size={18} /></button>
+        <span className="modal-icon">{isGuest ? <Play /> : isLogin ? <Lock /> : <Rocket />}</span>
+        <p className="eyebrow">{eyebrow}</p>
+        <h2 id="entry-title">{title}</h2>
+        <p>{isGuest ? 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
+        <form onSubmit={submit}>
+          {!isLogin && <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete="nickname" /></label>}
+          {!isGuest && <label>Email address<input autoFocus={isLogin} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" /></label>}
+          {!isGuest && (
+            <label>Password
+              <span className="password-field">
+                <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isLogin ? 'Enter your password' : 'At least 8 characters'} autoComplete={isLogin ? 'current-password' : 'new-password'} />
+                <button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? <EyeOff /> : <Eye />}</button>
+              </span>
+            </label>
+          )}
+          {!isGuest && !isLogin && <label>Confirm password<input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Repeat your password" autoComplete="new-password" /></label>}
+          {!isGuest && !isLogin && <p className={password && !passwordStrong ? 'password-rule invalid' : 'password-rule'}><Lock /> Use 8+ characters with at least one letter and one number.</p>}
+          {error && <p className="auth-message error" role="alert">{error}</p>}
+          {notice && <p className="auth-message success" role="status">{notice}</p>}
+          <button type="submit" className="button button-wide" disabled={!valid || loading}>{loading ? 'Please wait…' : isGuest ? 'Find an opponent' : isLogin ? 'Log in' : 'Create account'} {!loading && <ArrowRight size={18} />}</button>
         </form>
-        <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'No spam. Just scores, streaks, and science.'}</small>
+        <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'Passwords are handled securely by Supabase Auth.'}</small>
+        {!isGuest && <button className="auth-switch" onClick={() => switchMode(isLogin ? 'create' : 'login')}>{isLogin ? 'New here? Create an account' : 'Already have an account? Log in'}</button>}
       </div>
     </div>
   );
@@ -434,10 +537,10 @@ function Results({ player, opponent, result, onRematch, onHome }) {
   );
 }
 
-function Landing({ onGuest, onCreate }) {
+function Landing({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
-      <Header onGuest={onGuest} onCreate={onCreate} />
+      <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
       <main>
         <section className="hero">
           <div className="hero-copy">
@@ -445,7 +548,10 @@ function Landing({ onGuest, onCreate }) {
             <p className="eyebrow">REAL-TIME STEM SHOWDOWNS</p>
             <h1>Think fast.<br />Win <em>faster.</em></h1>
             <p className="hero-sub">Go head-to-head in rapid-fire STEM battles. Outsmart real opponents, climb the universal ranks, and prove your brain has game.</p>
-            <div className="hero-actions"><button className="button button-large" onClick={onGuest}><Play fill="currentColor" size={18} /> Play as guest</button><button className="button button-secondary button-large" onClick={onCreate}>Create account <ArrowRight size={18} /></button></div>
+            <div className="hero-actions">
+              <button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" size={18} /> {accountName ? 'Play with my account' : 'Play as guest'}</button>
+              {accountName ? <span className="signed-in-copy"><Check /> Signed in as <b>{accountName}</b></span> : <button className="button button-secondary button-large" onClick={onCreate}>Create account <ArrowRight size={18} /></button>}
+            </div>
             <p className="fine-print"><Check size={14} /> Free to play <Check size={14} /> No download <Check size={14} /> Match in seconds</p>
           </div>
           <BattleCard />
@@ -486,6 +592,8 @@ export default function App() {
   const [opponent, setOpponent] = useState('');
   const [match, setMatch] = useState(null);
   const [result, setResult] = useState(null);
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(!supabase);
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
   const handleFinish = useCallback((data) => { setResult(data); setScreen('results'); }, []);
 
@@ -502,12 +610,30 @@ export default function App() {
     };
   }, [match?.id, opponent, player, screen]);
 
+  useEffect(() => {
+    if (!supabase) return undefined;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthReady(true);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const accountName = session?.user?.user_metadata?.battle_name
+    || session?.user?.email?.split('@')[0]
+    || '';
+
   function start(name) { setPlayer(name); setModal(null); setScreen('matchmaking'); }
+  function playAccount() { if (accountName) start(accountName); else setModal('login'); }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
   function home() { setScreen('landing'); setResult(null); setMatch(null); setOpponent(''); }
+  async function logout() { await supabase?.auth.signOut(); home(); }
 
   if (screen === 'matchmaking') return <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
-  return <><Landing onGuest={() => setModal('guest')} onCreate={() => setModal('create')} />{modal && <EntryModal mode={modal} onClose={() => setModal(null)} onStart={start} />}</>;
+  return <>
+    <Landing accountName={authReady ? accountName : ''} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
+  </>;
 }

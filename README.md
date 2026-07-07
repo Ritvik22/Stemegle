@@ -34,3 +34,7 @@ npm run build
 ## Multiplayer architecture
 
 Supabase Realtime Presence powers the shared queue and deterministic two-player pairing. Each match uses an isolated match-specific channel to synchronize start time, live scores, connection presence, and final results. Account authentication, server-authoritative scoring, and persistent ranked seasons are the next backend layer.
+
+## Accounts
+
+Supabase Auth provides persistent email/password accounts. Users can create a password-protected account, confirm their email when required, log in across devices, log out, or continue with session-only guest play. Passwords are submitted directly to Supabase Auth and are never stored by the Stemegle frontend.

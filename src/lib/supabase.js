@@ -9,7 +9,11 @@ export const hasRealtimeConfig = Boolean(supabaseUrl && supabaseKey);
 
 export const supabase = hasRealtimeConfig
   ? createClient(supabaseUrl, supabaseKey, {
-      auth: { persistSession: false },
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
       realtime: { params: { eventsPerSecond: 20 } },
     })
   : null;
