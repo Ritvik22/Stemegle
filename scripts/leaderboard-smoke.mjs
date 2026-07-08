@@ -18,6 +18,11 @@ try {
     const [{ count: afterCount }] = await tx`select count(*)::integer as count from public.matches`;
     if (afterCount !== beforeCount + 1) throw new Error('Duplicate reports changed the match total more than once');
 
+    const rankings = await tx`select rank_position, total_score from public.leaderboard_rankings order by rank_position`;
+    if (rankings.length === 0) throw new Error('Leaderboard omitted registered accounts');
+    if (rankings.some((entry, index) => Number(entry.rank_position) !== index + 1)) throw new Error('Leaderboard ranks are not sequential');
+    if (rankings.some((entry, index) => index > 0 && Number(entry.total_score) > Number(rankings[index - 1].total_score))) throw new Error('Leaderboard is not score ordered');
+
     const [account] = await tx`select id from public.profiles order by created_at asc limit 1`;
     if (account) {
       await tx`select set_config('request.jwt.claim.sub', ${account.id}, true)`;

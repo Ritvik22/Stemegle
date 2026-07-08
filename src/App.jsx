@@ -39,26 +39,33 @@ const VISITOR_ID = (() => {
   return id;
 })();
 
-function useLiveStats() {
+function useLiveStats(accountId) {
   const [onlineCount, setOnlineCount] = useState(null);
   const [gamesPlayed, setGamesPlayed] = useState(null);
   const [registeredUsers, setRegisteredUsers] = useState(null);
   const [leaders, setLeaders] = useState(null);
+  const [accountRank, setAccountRank] = useState(null);
 
   useEffect(() => {
     if (!supabase) return undefined;
 
     let active = true;
     const refreshStats = async () => {
-      const [count, userCount, leaderboard] = await Promise.all([
+      const [count, userCount, leaderboardResult] = await Promise.all([
         fetchGamesPlayed(),
         fetchRegisteredUsers(),
-        fetchLeaderboard(),
+        fetchLeaderboard(accountId),
       ]);
       if (!active) return;
       if (count !== null) setGamesPlayed(count);
       if (userCount !== null) setRegisteredUsers(userCount);
-      setLeaders(leaderboard);
+      if (leaderboardResult === false) {
+        setLeaders(false);
+        setAccountRank(null);
+      } else {
+        setLeaders(leaderboardResult.leaders);
+        setAccountRank(leaderboardResult.accountRank);
+      }
     };
     refreshStats();
 
@@ -96,9 +103,9 @@ function useLiveStats() {
       supabase.removeChannel(visitorsChannel);
       supabase.removeChannel(statsChannel);
     };
-  }, []);
+  }, [accountId]);
 
-  return { onlineCount, gamesPlayed, registeredUsers, leaders };
+  return { onlineCount, gamesPlayed, registeredUsers, leaders, accountRank };
 }
 
 function createPlayerId() {
@@ -649,7 +656,7 @@ function Results({ player, opponent, result, onRematch, onHome }) {
   );
 }
 
-function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
@@ -687,19 +694,19 @@ function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPla
         </section>
 
         <section className="leader-section" id="leaderboard">
-          <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every completed account battle adds its earned score to one universal, live leaderboard.</p><div className="rank-stat"><Trophy /><span><b>{gamesPlayed === null ? 'Loading live total…' : `${gamesPlayed.toLocaleString()} matches completed`}</b><small>Verified from recorded match IDs</small></span></div><button className="button button-light" onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'Play a ranked match' : 'Claim your rank'} <ArrowRight /></button></div>
+          <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every account has a global rank. Scores from signed-in battles move that rank; guest battles count toward the match total but are not attached to an account.</p><div className="rank-stat"><Trophy /><span><b>{gamesPlayed === null ? 'Loading live total…' : `${gamesPlayed.toLocaleString()} matches completed`}</b><small>Verified from recorded match IDs</small></span></div><button className="button button-light" onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'Play a ranked match' : 'Claim your rank'} <ArrowRight /></button></div>
           <div className="leaderboard-card">
             <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>ALL TIME</span></div>
             <div className="leader-cols"><span>RANK & ACCOUNT</span><span>WINS</span><span>SCORE</span></div>
-            {Array.isArray(leaders) && leaders.map((leader, index) => <div className="leader-row" key={leader.id}><span className={index < 3 ? 'leader-rank top' : 'leader-rank'}>{index + 1}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{index === 0 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
+            {Array.isArray(leaders) && leaders.map((leader) => <div className="leader-row" key={leader.id}><span className={leader.rank_position <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank_position}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{leader.rank_position === 1 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
             {leaders === null && <div className="leader-empty"><Globe2 /><strong>Loading live rankings…</strong><span>Connecting to the global leaderboard.</span></div>}
             {leaders === false && <div className="leader-empty"><Globe2 /><strong>Rankings temporarily unavailable</strong><span>Live data could not be loaded. Please try again shortly.</span></div>}
             {Array.isArray(leaders) && leaders.length === 0 && <div className="leader-empty"><Trophy /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
-            <div className="your-rank"><span>—</span><span className="leader-avatar">{accountName ? accountName[0].toUpperCase() : 'Y'}</span><strong>{accountName ? 'Complete a match to update your rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
+            <div className="your-rank"><span>{accountRank ? `#${accountRank.rank_position}` : '—'}</span><span className="leader-avatar">{accountName ? accountName[0].toUpperCase() : 'Y'}</span><strong>{accountRank ? `${accountRank.total_score.toLocaleString()} score · ${accountRank.matches_played.toLocaleString()} ranked matches` : accountName ? 'Loading your global rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
           </div>
         </section>
 
-        <section className="final-cta"><div className="cta-orbit orbit-one" /><div className="cta-orbit orbit-two" /><span className="cta-icon"><Rocket /></span><p className="eyebrow">YOUR NEXT RIVAL IS ONLINE</p><h2>Ready to put your<br />brain on the board?</h2><p>One name. Five questions. Infinite bragging rights.</p><button className="button button-large" onClick={onGuest}><Play fill="currentColor" /> Start battling — it’s free</button></section>
+        <section className="final-cta"><div className="cta-orbit orbit-one" /><div className="cta-orbit orbit-two" /><span className="cta-icon"><Rocket /></span><p className="eyebrow">YOUR NEXT RIVAL IS ONLINE</p><h2>Ready to put your<br />brain on the board?</h2><p>One name. Five questions. Infinite bragging rights.</p><button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" /> {accountName ? 'Play a ranked match' : 'Start battling — it’s free'}</button></section>
       </main>
       <footer><Logo /><p>Competitive STEM for curious minds everywhere.</p><span>© 2026 Stemegle</span></footer>
     </div>
@@ -716,7 +723,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
-  const { onlineCount, gamesPlayed, registeredUsers, leaders } = useLiveStats();
+  const { onlineCount, gamesPlayed, registeredUsers, leaders, accountRank } = useLiveStats(session?.user?.id);
   const fromConfirmLink = useRef(
     window.location.hash.includes('access_token') ||
     Boolean(new URLSearchParams(window.location.search).get('code'))
@@ -777,7 +784,7 @@ export default function App() {
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <>
-    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
     {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 }

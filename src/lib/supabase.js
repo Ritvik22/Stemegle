@@ -41,17 +41,25 @@ export async function fetchRegisteredUsers() {
   return error ? null : count;
 }
 
-export async function fetchLeaderboard() {
+export async function fetchLeaderboard(accountId) {
   if (!supabase) return false;
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id,battle_name,total_score,wins,matches_played,streak')
-    .gt('matches_played', 0)
-    .order('total_score', { ascending: false })
-    .order('wins', { ascending: false })
-    .order('updated_at', { ascending: true })
+  const columns = 'rank_position,id,battle_name,total_score,wins,losses,matches_played,streak';
+  const topRanks = supabase
+    .from('leaderboard_rankings')
+    .select(columns)
+    .order('rank_position', { ascending: true })
     .limit(10);
-  return error ? false : data;
+  const ownRank = accountId
+    ? supabase.from('leaderboard_rankings').select(columns).eq('id', accountId).maybeSingle()
+    : Promise.resolve({ data: null, error: null });
+  const [{ data: leaders, error: leadersError }, { data: accountRank, error: accountError }] = await Promise.all([topRanks, ownRank]);
+  if (leadersError || accountError) return false;
+  const normalizeRank = (entry) => entry ? {
+    ...entry,
+    rank_position: Number(entry.rank_position),
+    total_score: Number(entry.total_score),
+  } : null;
+  return { leaders: leaders.map(normalizeRank), accountRank: normalizeRank(accountRank) };
 }
 
 export async function recordMatchResult(matchId, score, opponentScore) {
