@@ -1,4 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
+import { getQuestionsForMatch } from '../src/data/questions.js';
+
+const fingerprint = (questions) => (questions ?? []).map((item) => item.q).join(' | ');
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -33,6 +36,7 @@ function joinMatch(pair) {
   let opponentReady = false;
   let started = false;
   let startsAt = null;
+  let questionSet = null;
   let heartbeat;
 
   match = supabase.channel(`stemegle:match:${matchId}`, {
@@ -43,11 +47,12 @@ function joinMatch(pair) {
     .on('broadcast', { event: 'ready' }, ({ payload }) => {
       if (payload.playerId !== playerId) opponentReady = true;
     })
-    .on('broadcast', { event: 'start' }, async () => {
+    .on('broadcast', { event: 'start' }, async ({ payload }) => {
       if (started) return;
       started = true;
       clearInterval(heartbeat);
       console.log(`MATCHED:${opponent.name}`);
+      console.log(`QUESTIONS:${fingerprint(payload.questions)}`);
       await lobby.untrack();
       await supabase.removeChannel(lobby);
       setTimeout(async () => {
@@ -83,7 +88,8 @@ function joinMatch(pair) {
           match.send({ type: 'broadcast', event: 'ready', payload: { playerId } });
           if (isHost && opponentReady) {
             startsAt = startsAt ?? Date.now() + 2000;
-            match.send({ type: 'broadcast', event: 'start', payload: { startsAt } });
+            questionSet = questionSet ?? getQuestionsForMatch(matchId);
+            match.send({ type: 'broadcast', event: 'start', payload: { startsAt, questions: questionSet } });
           }
         }, 700);
       }

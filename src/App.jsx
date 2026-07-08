@@ -317,8 +317,9 @@ function Matchmaking({ name, onMatched, onCancel }) {
       attempt = { channel, opponentId: opponent.playerId, intervals: [], timers: [] };
       let opponentReady = false;
       let startsAt = null;
+      let questionSet = null;
 
-      const finalize = (agreedStartsAt) => {
+      const finalize = (payload) => {
         if (!active || joinedMatch) return;
         joinedMatch = true;
         attempt.intervals.forEach(clearInterval);
@@ -332,7 +333,11 @@ function Matchmaking({ name, onMatched, onCancel }) {
           events,
           playerId: playerId.current,
           opponent: { id: opponent.playerId, name: opponent.name },
-          startsAt: agreedStartsAt,
+          startsAt: payload.startsAt,
+          // Host is the single source of truth for the question set so both
+          // players always get an identical match, even if their local question
+          // banks differ (e.g. mid-deploy). Fall back to deriving from matchId.
+          questions: payload.questions ?? getQuestionsForMatch(matchId),
         });
       };
 
@@ -340,7 +345,7 @@ function Matchmaking({ name, onMatched, onCancel }) {
         .on('broadcast', { event: 'ready' }, ({ payload }) => {
           if (payload.playerId !== playerId.current) opponentReady = true;
         })
-        .on('broadcast', { event: 'start' }, ({ payload }) => finalize(payload.startsAt))
+        .on('broadcast', { event: 'start' }, ({ payload }) => finalize(payload))
         .on('broadcast', { event: 'score' }, ({ payload }) => events.emit('score', payload))
         .on('broadcast', { event: 'finish' }, ({ payload }) => events.emit('finish', payload))
         .on('presence', { event: 'sync' }, () => {
@@ -361,7 +366,8 @@ function Matchmaking({ name, onMatched, onCancel }) {
               channel.send({ type: 'broadcast', event: 'ready', payload: { playerId: playerId.current } });
               if (isHost && opponentReady) {
                 startsAt = startsAt ?? Date.now() + 2000;
-                channel.send({ type: 'broadcast', event: 'start', payload: { startsAt } });
+                questionSet = questionSet ?? getQuestionsForMatch(matchId);
+                channel.send({ type: 'broadcast', event: 'start', payload: { startsAt, questions: questionSet } });
               }
             }, 700));
           }
@@ -457,7 +463,7 @@ function Matchmaking({ name, onMatched, onCancel }) {
 }
 
 function Game({ player, match, onFinish, onExit }) {
-  const questions = useRef(getQuestionsForMatch(match.id)).current;
+  const questions = useRef(match.questions ?? getQuestionsForMatch(match.id)).current;
   const [questionIndex, setQuestionIndex] = useState(0);
   const [time, setTime] = useState(15);
   const [score, setScore] = useState(0);
