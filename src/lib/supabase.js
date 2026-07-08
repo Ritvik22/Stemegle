@@ -33,6 +33,14 @@ export async function fetchGamesPlayed() {
   return error ? null : count;
 }
 
+export async function fetchRegisteredUsers() {
+  if (!supabase) return null;
+  const { count, error } = await supabase
+    .from('profiles')
+    .select('*', { count: 'exact', head: true });
+  return error ? null : count;
+}
+
 export async function fetchLeaderboard() {
   if (!supabase) return false;
   const { data, error } = await supabase

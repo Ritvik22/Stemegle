@@ -24,7 +24,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { fetchGamesPlayed, fetchLeaderboard, getPresencePlayers, hasRealtimeConfig, recordMatchResult, supabase } from './lib/supabase';
+import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePlayers, hasRealtimeConfig, recordMatchResult, supabase } from './lib/supabase';
 import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
@@ -41,6 +41,7 @@ const VISITOR_ID = (() => {
 function useLiveStats() {
   const [onlineCount, setOnlineCount] = useState(null);
   const [gamesPlayed, setGamesPlayed] = useState(null);
+  const [registeredUsers, setRegisteredUsers] = useState(null);
   const [leaders, setLeaders] = useState(null);
 
   useEffect(() => {
@@ -48,9 +49,14 @@ function useLiveStats() {
 
     let active = true;
     const refreshStats = async () => {
-      const [count, leaderboard] = await Promise.all([fetchGamesPlayed(), fetchLeaderboard()]);
+      const [count, userCount, leaderboard] = await Promise.all([
+        fetchGamesPlayed(),
+        fetchRegisteredUsers(),
+        fetchLeaderboard(),
+      ]);
       if (!active) return;
       if (count !== null) setGamesPlayed(count);
+      if (userCount !== null) setRegisteredUsers(userCount);
       setLeaders(leaderboard);
     };
     refreshStats();
@@ -91,7 +97,7 @@ function useLiveStats() {
     };
   }, []);
 
-  return { onlineCount, gamesPlayed, leaders };
+  return { onlineCount, gamesPlayed, registeredUsers, leaders };
 }
 
 function createPlayerId() {
@@ -642,7 +648,7 @@ function Results({ player, opponent, result, onRematch, onHome }) {
   );
 }
 
-function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPlayed, leaders, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
@@ -654,6 +660,7 @@ function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPla
               <Globe2 size={22} />
               <span>{onlineCount !== null ? <><b>{onlineCount.toLocaleString()}</b> online now</> : <><b>Live</b> matchmaking is online</>}</span>
               {gamesPlayed !== null && <span className="games-played-chip"><Zap size={12} /> <b>{gamesPlayed.toLocaleString()}</b> matches completed all time</span>}
+              {registeredUsers !== null && <span className="games-played-chip"><CircleUserRound size={12} /> <b>{registeredUsers.toLocaleString()}</b> accounts created</span>}
             </div>
             <p className="eyebrow">REAL-TIME STEM SHOWDOWNS</p>
             <h1>Think fast.<br />Win <em>faster.</em></h1>
@@ -708,7 +715,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
-  const { onlineCount, gamesPlayed, leaders } = useLiveStats();
+  const { onlineCount, gamesPlayed, registeredUsers, leaders } = useLiveStats();
   const fromConfirmLink = useRef(
     window.location.hash.includes('access_token') ||
     Boolean(new URLSearchParams(window.location.search).get('code'))
@@ -769,7 +776,7 @@ export default function App() {
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <>
-    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} leaders={leaders} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
     {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 }
