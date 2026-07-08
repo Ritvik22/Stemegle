@@ -29,13 +29,24 @@ function joinMatch(pair) {
   const ordered = [...pair].sort((a, b) => a.playerId.localeCompare(b.playerId));
   const opponent = ordered.find((candidate) => candidate.playerId !== playerId);
   const matchId = ordered.map((candidate) => candidate.playerId).join('--');
+  const isHost = ordered[0].playerId === playerId;
+  let opponentReady = false;
+  let started = false;
+  let startsAt = null;
+  let heartbeat;
 
   match = supabase.channel(`stemegle:match:${matchId}`, {
     config: { presence: { key: playerId }, broadcast: { self: true, ack: true } },
   });
 
   match
+    .on('broadcast', { event: 'ready' }, ({ payload }) => {
+      if (payload.playerId !== playerId) opponentReady = true;
+    })
     .on('broadcast', { event: 'start' }, async () => {
+      if (started) return;
+      started = true;
+      clearInterval(heartbeat);
       console.log(`MATCHED:${opponent.name}`);
       await lobby.untrack();
       await supabase.removeChannel(lobby);
@@ -67,6 +78,14 @@ function joinMatch(pair) {
     .subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         await match.track({ playerId, name, joinedAt: Date.now() });
+        heartbeat = setInterval(() => {
+          if (started) return;
+          match.send({ type: 'broadcast', event: 'ready', payload: { playerId } });
+          if (isHost && opponentReady) {
+            startsAt = startsAt ?? Date.now() + 2000;
+            match.send({ type: 'broadcast', event: 'start', payload: { startsAt } });
+          }
+        }, 700);
       }
     });
 }

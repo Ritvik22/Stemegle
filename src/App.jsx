@@ -279,16 +279,23 @@ function Matchmaking({ name, onMatched, onCancel }) {
 
     let active = true;
     let lobbyChannel;
-    let matchChannel;
+    let attempt = null;
     let joinedMatch = false;
 
-    const joinPairChannel = (players) => {
-      if (!active || matchChannel) return;
+    const clearAttempt = () => {
+      if (!attempt) return;
+      attempt.intervals.forEach(clearInterval);
+      attempt.timers.forEach(clearTimeout);
+      attempt.channel.untrack();
+      supabase.removeChannel(attempt.channel);
+      attempt = null;
+      setOpponentOnline(false);
+      setStatus('waiting');
+    };
 
-      const orderedPair = [...players].sort((a, b) => a.playerId.localeCompare(b.playerId));
-      const opponent = orderedPair.find((candidate) => candidate.playerId !== playerId.current);
-      const matchId = orderedPair.map((candidate) => candidate.playerId).join('--');
-      const isHost = orderedPair[0].playerId === playerId.current;
+    const beginAttempt = (opponent) => {
+      const matchId = [playerId.current, opponent.playerId].sort().join('--');
+      const isHost = matchId.startsWith(playerId.current);
       const eventListeners = new Set();
       const events = {
         subscribe(listener) {
@@ -300,53 +307,103 @@ function Matchmaking({ name, onMatched, onCancel }) {
         },
       };
 
-      setOpponentOnline(true);
-      setStatus('opponent-found');
-
-      matchChannel = supabase.channel(`stemegle:match:${matchId}`, {
+      const channel = supabase.channel(`stemegle:match:${matchId}`, {
         config: {
           presence: { key: playerId.current },
           broadcast: { self: true, ack: true },
         },
       });
 
-      matchChannel
-        .on('broadcast', { event: 'start' }, async ({ payload }) => {
-          if (!active || joinedMatch) return;
-          joinedMatch = true;
-          await lobbyChannel.untrack();
-          await supabase.removeChannel(lobbyChannel);
-          onMatched({
-            id: matchId,
-            channel: matchChannel,
-            events,
-            playerId: playerId.current,
-            opponent: { id: opponent.playerId, name: opponent.name },
-            startsAt: payload.startsAt,
-          });
+      attempt = { channel, opponentId: opponent.playerId, intervals: [], timers: [] };
+      let opponentReady = false;
+      let startsAt = null;
+
+      const finalize = (agreedStartsAt) => {
+        if (!active || joinedMatch) return;
+        joinedMatch = true;
+        attempt.intervals.forEach(clearInterval);
+        attempt.timers.forEach(clearTimeout);
+        lobbyChannel.untrack();
+        supabase.removeChannel(lobbyChannel);
+        lobbyChannel = null;
+        onMatched({
+          id: matchId,
+          channel,
+          events,
+          playerId: playerId.current,
+          opponent: { id: opponent.playerId, name: opponent.name },
+          startsAt: agreedStartsAt,
+        });
+      };
+
+      channel
+        .on('broadcast', { event: 'ready' }, ({ payload }) => {
+          if (payload.playerId !== playerId.current) opponentReady = true;
         })
+        .on('broadcast', { event: 'start' }, ({ payload }) => finalize(payload.startsAt))
         .on('broadcast', { event: 'score' }, ({ payload }) => events.emit('score', payload))
         .on('broadcast', { event: 'finish' }, ({ payload }) => events.emit('finish', payload))
         .on('presence', { event: 'sync' }, () => {
-          const matchPlayers = getPresencePlayers(matchChannel);
+          const matchPlayers = getPresencePlayers(channel);
           events.emit('presence', matchPlayers);
-          if (matchPlayers.length === 2 && isHost && !joinedMatch) {
-            matchChannel.send({
-              type: 'broadcast',
-              event: 'start',
-              payload: { startsAt: Date.now() + 1800 },
-            });
+          if (matchPlayers.length === 2 && !joinedMatch) {
+            setOpponentOnline(true);
+            setStatus('opponent-found');
           }
         })
         .subscribe(async (subscriptionStatus) => {
-          if (subscriptionStatus === 'SUBSCRIBED') {
-            await matchChannel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+          if (subscriptionStatus === 'SUBSCRIBED' && attempt?.channel === channel) {
+            await channel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+            // Handshake heartbeat: announce readiness until the match starts, so a
+            // missed broadcast is always retried rather than hanging both players.
+            attempt.intervals.push(setInterval(() => {
+              if (joinedMatch || !active) return;
+              channel.send({ type: 'broadcast', event: 'ready', payload: { playerId: playerId.current } });
+              if (isHost && opponentReady) {
+                startsAt = startsAt ?? Date.now() + 2000;
+                channel.send({ type: 'broadcast', event: 'start', payload: { startsAt } });
+              }
+            }, 700));
           }
           if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
-            setError('The live match connection failed. Please try again.');
-            setStatus('error');
+            if (attempt?.channel === channel) {
+              clearAttempt();
+              pairFromLobby();
+            }
           }
         });
+
+      // If the handshake doesn't complete quickly, this pairing is dead (ghost
+      // presence or the opponent paired elsewhere) — drop it and re-queue.
+      attempt.timers.push(setTimeout(() => {
+        if (joinedMatch || !active) return;
+        clearAttempt();
+        pairFromLobby();
+      }, 8000));
+    };
+
+    const pairFromLobby = () => {
+      if (!active || joinedMatch || !lobbyChannel) return;
+      const players = getPresencePlayers(lobbyChannel)
+        .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+      const ownIndex = players.findIndex((candidate) => candidate.playerId === playerId.current);
+      if (ownIndex === -1) return;
+      const partnerIndex = ownIndex % 2 === 0 ? ownIndex + 1 : ownIndex - 1;
+      const partner = players[partnerIndex];
+
+      if (!partner) {
+        // Nobody to pair with right now; abandon any half-open attempt.
+        clearAttempt();
+        setOpponentOnline(false);
+        setStatus('waiting');
+        return;
+      }
+      if (attempt) {
+        if (attempt.opponentId === partner.playerId) return;
+        // Pairing changed (e.g. our previous partner matched with someone else).
+        clearAttempt();
+      }
+      beginAttempt(partner);
     };
 
     lobbyChannel = supabase.channel(LOBBY_CHANNEL, {
@@ -354,18 +411,7 @@ function Matchmaking({ name, onMatched, onCancel }) {
     });
 
     lobbyChannel
-      .on('presence', { event: 'sync' }, () => {
-        if (!active || matchChannel) return;
-        const players = getPresencePlayers(lobbyChannel)
-          .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
-        const ownIndex = players.findIndex((candidate) => candidate.playerId === playerId.current);
-        const partnerIndex = ownIndex % 2 === 0 ? ownIndex + 1 : ownIndex - 1;
-        const opponent = players[partnerIndex];
-
-        setOpponentOnline(Boolean(opponent));
-        setStatus(opponent ? 'opponent-found' : 'waiting');
-        if (opponent) joinPairChannel([players[ownIndex], opponent]);
-      })
+      .on('presence', { event: 'sync' }, pairFromLobby)
       .subscribe(async (subscriptionStatus) => {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('waiting');
@@ -384,10 +430,7 @@ function Matchmaking({ name, onMatched, onCancel }) {
         lobbyChannel.untrack();
         supabase.removeChannel(lobbyChannel);
       }
-      if (matchChannel && !joinedMatch) {
-        matchChannel.untrack();
-        supabase.removeChannel(matchChannel);
-      }
+      if (attempt && !joinedMatch) clearAttempt();
     };
   }, [name, onMatched]);
 
