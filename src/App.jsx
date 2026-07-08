@@ -41,7 +41,7 @@ const VISITOR_ID = (() => {
 function useLiveStats() {
   const [onlineCount, setOnlineCount] = useState(null);
   const [gamesPlayed, setGamesPlayed] = useState(null);
-  const [leaders, setLeaders] = useState([]);
+  const [leaders, setLeaders] = useState(null);
 
   useEffect(() => {
     if (!supabase) return undefined;
@@ -683,8 +683,10 @@ function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPla
           <div className="leaderboard-card">
             <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>ALL TIME</span></div>
             <div className="leader-cols"><span>RANK & ACCOUNT</span><span>WINS</span><span>SCORE</span></div>
-            {leaders.map((leader, index) => <div className="leader-row" key={leader.id}><span className={index < 3 ? 'leader-rank top' : 'leader-rank'}>{index + 1}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{index === 0 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
-            {leaders.length === 0 && <div className="leader-empty"><Trophy /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
+            {Array.isArray(leaders) && leaders.map((leader, index) => <div className="leader-row" key={leader.id}><span className={index < 3 ? 'leader-rank top' : 'leader-rank'}>{index + 1}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{index === 0 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
+            {leaders === null && <div className="leader-empty"><Globe2 /><strong>Loading live rankings…</strong><span>Connecting to the global leaderboard.</span></div>}
+            {leaders === false && <div className="leader-empty"><Globe2 /><strong>Rankings temporarily unavailable</strong><span>Live data could not be loaded. Please try again shortly.</span></div>}
+            {Array.isArray(leaders) && leaders.length === 0 && <div className="leader-empty"><Trophy /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
             <div className="your-rank"><span>—</span><span className="leader-avatar">{accountName ? accountName[0].toUpperCase() : 'Y'}</span><strong>{accountName ? 'Complete a match to update your rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
           </div>
         </section>

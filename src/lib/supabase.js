@@ -34,7 +34,7 @@ export async function fetchGamesPlayed() {
 }
 
 export async function fetchLeaderboard() {
-  if (!supabase) return [];
+  if (!supabase) return false;
   const { data, error } = await supabase
     .from('profiles')
     .select('id,battle_name,total_score,wins,matches_played,streak')
@@ -43,7 +43,7 @@ export async function fetchLeaderboard() {
     .order('wins', { ascending: false })
     .order('updated_at', { ascending: true })
     .limit(10);
-  return error ? [] : data;
+  return error ? false : data;
 }
 
 export async function recordMatchResult(matchId, score, opponentScore) {
