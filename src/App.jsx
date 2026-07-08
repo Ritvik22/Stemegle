@@ -15,12 +15,18 @@ import {
   FlaskConical,
   Globe2,
   Lock,
+  Copy,
+  GitBranch,
+  Medal,
   Menu,
   Orbit,
   Play,
   Rocket,
+  Shuffle,
   Sparkles,
+  Swords,
   Trophy,
+  Users,
   X,
   Zap,
 } from 'lucide-react';
@@ -29,6 +35,8 @@ import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
 const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || 'https://stemegle.vercel.app';
+const PARTY_PREFIX = 'stemegle:party:';
+const PARTY_CODE_LENGTH = 5;
 
 const VISITOR_ID = (() => {
   const key = 'stemegle_vid';
@@ -112,6 +120,103 @@ function createPlayerId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function createPartyCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = new Uint8Array(PARTY_CODE_LENGTH);
+  globalThis.crypto?.getRandomValues?.(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
+}
+
+function normalizePartyCode(value) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, PARTY_CODE_LENGTH);
+}
+
+function getPartyCodeFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return normalizePartyCode(params.get('party') || '');
+}
+
+function getPartyQuestions(seed, count) {
+  const questions = [];
+  let batch = 0;
+  while (questions.length < count) {
+    const needed = count - questions.length;
+    questions.push(...getQuestionsForMatch(`${seed}:party:${batch}`, Math.min(needed, 5)));
+    batch += 1;
+  }
+  return questions.slice(0, count);
+}
+
+function splitPartyTeams(players) {
+  const ordered = [...players].sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+  const teamASize = Math.ceil(ordered.length / 2);
+  return ordered.map((player, index) => ({
+    ...player,
+    team: index < teamASize ? 'A' : 'B',
+  }));
+}
+
+function createTeamPartyConfig(partyCode, players, leaderId) {
+  const roster = splitPartyTeams(players);
+  const turnsPerPlayer = roster.length <= 4 ? 2 : 1;
+  const rounds = [];
+  for (let turn = 0; turn < turnsPerPlayer; turn += 1) {
+    roster.forEach((player) => {
+      rounds.push({
+        id: `${turn}-${player.playerId}`,
+        playerId: player.playerId,
+        playerName: player.name,
+        team: player.team,
+        questionIndex: rounds.length,
+      });
+    });
+  }
+  return {
+    id: `${partyCode}-team-${Date.now()}`,
+    type: 'team',
+    partyCode,
+    leaderId,
+    roster,
+    rounds,
+    questions: getPartyQuestions(`${partyCode}:team`, rounds.length),
+    startsAt: Date.now() + 1800,
+  };
+}
+
+function createTournamentPartyConfig(partyCode, players, leaderId) {
+  const entrants = [...players].sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+  return {
+    id: `${partyCode}-tournament-${Date.now()}`,
+    type: 'tournament',
+    partyCode,
+    leaderId,
+    entrants,
+    questions: getPartyQuestions(`${partyCode}:tournament`, Math.max(entrants.length * 2, 6)),
+    startsAt: Date.now() + 1800,
+  };
+}
+
+function buildTournamentPairs(players) {
+  const pairs = [];
+  for (let index = 0; index < players.length; index += 2) {
+    pairs.push(players.slice(index, index + 2));
+  }
+  return pairs;
+}
+
+function createEventBus() {
+  const listeners = new Set();
+  return {
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    emit(event, payload) {
+      listeners.forEach((listener) => listener(event, payload));
+    },
+  };
+}
+
 function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
 }
@@ -123,6 +228,7 @@ function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPl
       <Logo />
       <nav className={open ? 'nav open' : 'nav'} aria-label="Main navigation">
         <a href="#how" onClick={() => setOpen(false)}>How it works</a>
+        <a href="#party" onClick={() => setOpen(false)}>Party</a>
         <a href="#leaderboard" onClick={() => setOpen(false)}>Leaderboard</a>
         {accountName ? (
           <>
@@ -168,7 +274,7 @@ function BattleCard() {
   );
 }
 
-function EntryModal({ mode, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
+function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescription, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -258,7 +364,7 @@ function EntryModal({ mode, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
         <span className="modal-icon">{isGuest ? <Play /> : isLogin ? <Lock /> : <Rocket />}</span>
         <p className="eyebrow">{eyebrow}</p>
         <h2 id="entry-title">{title}</h2>
-        <p>{isGuest ? 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
+        <p>{isGuest ? guestDescription || 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
         <form onSubmit={submit}>
           {!isLogin && <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete="nickname" /></label>}
           {!isGuest && <label>Email address<input autoFocus={isLogin} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" /></label>}
@@ -274,7 +380,7 @@ function EntryModal({ mode, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
           {!isGuest && !isLogin && <p className={password && !passwordStrong ? 'password-rule invalid' : 'password-rule'}><Lock /> Use 8+ characters with at least one letter and one number.</p>}
           {error && <p className="auth-message error" role="alert">{error}</p>}
           {notice && <p className="auth-message success" role="status">{notice}</p>}
-          <button type="submit" className="button button-wide" disabled={!valid || loading}>{loading ? 'Please wait…' : isGuest ? 'Find an opponent' : isLogin ? 'Log in' : 'Create account'} {!loading && <ArrowRight size={18} />}</button>
+          <button type="submit" className="button button-wide" disabled={!valid || loading}>{loading ? 'Please wait…' : isGuest ? guestActionLabel : isLogin ? 'Log in' : 'Create account'} {!loading && <ArrowRight size={18} />}</button>
         </form>
         <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'Passwords are handled securely by Supabase Auth.'}</small>
         {!isGuest && <button className="auth-switch" onClick={() => switchMode(isLogin ? 'create' : 'login')}>{isLogin ? 'New here? Create an account' : 'Already have an account? Log in'}</button>}
@@ -479,6 +585,564 @@ function Matchmaking({ name, onMatched, onCancel }) {
   );
 }
 
+function PartyRoom({ name, onStartGame, onCancel }) {
+  const [partyCode, setPartyCode] = useState(getPartyCodeFromUrl());
+  const [joinCode, setJoinCode] = useState(getPartyCodeFromUrl());
+  const [players, setPlayers] = useState([]);
+  const [leaderId, setLeaderId] = useState('');
+  const [status, setStatus] = useState(hasRealtimeConfig ? 'idle' : 'configuration-error');
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const playerId = useRef(createPlayerId());
+  const channelRef = useRef(null);
+  const eventsRef = useRef(createEventBus());
+  const handedOffToGame = useRef(false);
+  const createdPartyCode = useRef('');
+
+  const isLeader = leaderId === playerId.current;
+  const teamPreview = players.length >= 2 ? splitPartyTeams(players) : [];
+  const teamACount = teamPreview.filter((player) => player.team === 'A').length;
+  const teamBCount = teamPreview.filter((player) => player.team === 'B').length;
+  const inviteLink = partyCode ? `${window.location.origin}${window.location.pathname}?party=${partyCode}` : '';
+
+  useEffect(() => {
+    if (!partyCode || !hasRealtimeConfig) return undefined;
+
+    let active = true;
+    setStatus('connecting');
+    setError('');
+    const channel = supabase.channel(`${PARTY_PREFIX}${partyCode}`, {
+      config: {
+        presence: { key: playerId.current },
+        broadcast: { self: true, ack: true },
+      },
+    });
+    channelRef.current = channel;
+
+    const refreshPresence = () => {
+      const roster = getPresencePlayers(channel)
+        .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+      const creator = roster.find((player) => player.partyLeader);
+      setPlayers(roster);
+      setLeaderId(creator?.playerId || '');
+    };
+
+    channel
+      .on('presence', { event: 'sync' }, refreshPresence)
+      .on('broadcast', { event: 'party-start' }, ({ payload }) => {
+        if (!active || !payload?.config) return;
+        handedOffToGame.current = true;
+        onStartGame({
+          ...payload.config,
+          channel,
+          events: eventsRef.current,
+          playerId: playerId.current,
+        });
+      })
+      .on('broadcast', { event: 'party-answer' }, ({ payload }) => eventsRef.current.emit('answer', payload))
+      .on('broadcast', { event: 'party-timeout' }, ({ payload }) => eventsRef.current.emit('timeout', payload))
+      .on('broadcast', { event: 'party-duel-answer' }, ({ payload }) => eventsRef.current.emit('duel-answer', payload))
+      .on('broadcast', { event: 'party-duel-result' }, ({ payload }) => eventsRef.current.emit('duel-result', payload))
+      .subscribe(async (subscriptionStatus) => {
+        if (subscriptionStatus === 'SUBSCRIBED') {
+          setStatus('ready');
+          await channel.track({
+            playerId: playerId.current,
+            name,
+            joinedAt: Date.now(),
+            partyLeader: createdPartyCode.current === partyCode,
+          });
+        }
+        if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
+          setStatus('error');
+          setError('Unable to connect to this party. Check the code and try again.');
+        }
+      });
+
+    return () => {
+      active = false;
+      if (!handedOffToGame.current) {
+        channel.untrack();
+        supabase.removeChannel(channel);
+        if (channelRef.current === channel) channelRef.current = null;
+      }
+    };
+  // Keep the subscription bound only to this party code. Presence sync owns the
+  // live roster/leader state after the first track payload.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [partyCode, name, onStartGame]);
+
+  function createParty() {
+    if (!hasRealtimeConfig) return;
+    const code = createPartyCode();
+    createdPartyCode.current = code;
+    setPartyCode(code);
+    setJoinCode(code);
+    setLeaderId(playerId.current);
+    window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
+  }
+
+  function joinParty(event) {
+    event.preventDefault();
+    const code = normalizePartyCode(joinCode);
+    if (code.length !== PARTY_CODE_LENGTH) {
+      setError('Enter a valid 5-character party code.');
+      return;
+    }
+    createdPartyCode.current = '';
+    setPartyCode(code);
+    setJoinCode(code);
+    window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
+  }
+
+  async function copyInvite() {
+    if (!inviteLink) return;
+    await navigator.clipboard?.writeText(inviteLink);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  }
+
+  function startTeamBattle() {
+    if (!isLeader || players.length < 2 || !channelRef.current) return;
+    const config = createTeamPartyConfig(partyCode, players, playerId.current);
+    channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
+  }
+
+  function startTournament() {
+    if (!isLeader || players.length < 2 || !channelRef.current) return;
+    const config = createTournamentPartyConfig(partyCode, players, playerId.current);
+    channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
+  }
+
+  const hasError = status === 'error' || status === 'configuration-error';
+
+  return (
+    <main className="game-shell party-screen">
+      <Logo />
+      <button className="icon-button" aria-label="Exit party" onClick={onCancel}><X /></button>
+      <section className="party-card">
+        <span className="modal-icon"><Users /></span>
+        <p className="eyebrow">{partyCode ? 'FRIEND PARTY' : 'PLAY WITH FRIENDS'}</p>
+        <h1>{partyCode ? `Party ${partyCode}` : 'Create or join a party'}</h1>
+        <p>{partyCode ? 'Share the code, wait for friends to appear, then the party leader chooses the game type.' : 'Create a private party code or paste a friend’s code to join their room.'}</p>
+
+        {hasError && <p className="auth-message error" role="alert">{error || 'Supabase realtime is not configured for parties on this deployment.'}</p>}
+
+        {!partyCode && (
+          <div className="party-entry-grid">
+            <button className="button button-large" onClick={createParty} disabled={!hasRealtimeConfig}><Users /> Create party</button>
+            <form onSubmit={joinParty} className="party-join-form">
+              <label>Party code<input value={joinCode} onChange={(event) => setJoinCode(normalizePartyCode(event.target.value))} placeholder="ABCDE" maxLength={PARTY_CODE_LENGTH} /></label>
+              <button className="button button-secondary" type="submit" disabled={!hasRealtimeConfig}>Join party <ArrowRight /></button>
+            </form>
+          </div>
+        )}
+
+        {partyCode && (
+          <>
+            <div className="party-invite">
+              <div><small>INVITE LINK</small><strong>{inviteLink}</strong></div>
+              <button className="button button-small" onClick={copyInvite}><Copy size={15} /> {copied ? 'Copied' : 'Copy'}</button>
+            </div>
+
+            <div className="party-roster">
+              <div className="party-roster-head"><span>{players.length} in party</span><small>{isLeader ? 'You are the leader' : 'Waiting for party leader'}</small></div>
+              {players.map((player) => (
+                <div className="party-player" key={player.playerId}>
+                  <span className="leader-avatar">{player.name[0].toUpperCase()}</span>
+                  <strong>{player.name}</strong>
+                  {player.playerId === leaderId && <small>LEADER</small>}
+                </div>
+              ))}
+            </div>
+
+            <div className="party-modes">
+              <article className="party-mode">
+                <span><Swords /></span>
+                <h3>Team Battle · {players.length >= 2 ? `${teamACount}v${teamBCount}` : 'XvX'}</h3>
+                <p>Splits the party into two teams. Everyone answers in rotation, and small parties get up to two turns each.</p>
+                <button className="button" onClick={startTeamBattle} disabled={!isLeader || players.length < 2}>Start team battle</button>
+              </article>
+              <article className="party-mode">
+                <span><GitBranch /></span>
+                <h3>Tournament</h3>
+                <p>Runs live 1v1 bracket duels. Winners advance until one party champion remains.</p>
+                <button className="button button-secondary" onClick={startTournament} disabled={!isLeader || players.length < 2}>Start tournament</button>
+              </article>
+            </div>
+            {!isLeader && <p className="queue-note">Only the party leader can choose and start the game type.</p>}
+            {isLeader && players.length < 2 && <p className="queue-note">Invite at least one friend to unlock party games.</p>}
+          </>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function PartyGame({ player, game, onFinish, onExit }) {
+  if (game.type === 'tournament') {
+    return <TournamentPartyGame player={player} game={game} onFinish={onFinish} onExit={onExit} />;
+  }
+  return <TeamPartyGame player={player} game={game} onFinish={onFinish} onExit={onExit} />;
+}
+
+function TeamPartyGame({ player, game, onFinish, onExit }) {
+  const [roundIndex, setRoundIndex] = useState(0);
+  const [time, setTime] = useState(15);
+  const [selected, setSelected] = useState(null);
+  const [feedback, setFeedback] = useState('');
+  const [scores, setScores] = useState({ A: 0, B: 0 });
+  const [playerScores, setPlayerScores] = useState({});
+  const [started, setStarted] = useState(Date.now() >= game.startsAt);
+  const transitionTimer = useRef(null);
+  const resolvedRounds = useRef(new Set());
+  const round = game.rounds[roundIndex];
+  const question = game.questions[round.questionIndex];
+  const isLeader = game.leaderId === game.playerId;
+  const isActive = round.playerId === game.playerId;
+  const teamA = game.roster.filter((member) => member.team === 'A');
+  const teamB = game.roster.filter((member) => member.team === 'B');
+
+  const resolveRound = useCallback((payload) => {
+    if (!payload || payload.roundId !== round.id || resolvedRounds.current.has(payload.roundId)) return;
+    resolvedRounds.current.add(payload.roundId);
+    setSelected(payload.selected ?? -1);
+    if (payload.correct) {
+      setScores((current) => ({ ...current, [payload.team]: current[payload.team] + payload.gain }));
+      setPlayerScores((current) => ({ ...current, [payload.playerId]: (current[payload.playerId] || 0) + payload.gain }));
+      setFeedback(`${payload.playerName} scored +${payload.gain} for Team ${payload.team}`);
+    } else {
+      setFeedback(payload.timedOut ? `${payload.playerName} ran out of time.` : `${payload.playerName} missed it.`);
+    }
+    transitionTimer.current = setTimeout(() => {
+      if (roundIndex === game.rounds.length - 1) {
+        const finalScores = payload.correct
+          ? { ...scores, [payload.team]: scores[payload.team] + payload.gain }
+          : scores;
+        const winner = finalScores.A === finalScores.B ? 'TIE' : finalScores.A > finalScores.B ? 'A' : 'B';
+        onFinish({
+          type: 'party-team',
+          score: finalScores.A,
+          opponentScore: finalScores.B,
+          teamScores: finalScores,
+          winner,
+          summary: winner === 'TIE' ? 'Team battle tied.' : `Team ${winner} wins the party battle.`,
+        });
+        return;
+      }
+      setRoundIndex((index) => index + 1);
+      setTime(15);
+      setSelected(null);
+      setFeedback('');
+    }, 950);
+  }, [game.rounds.length, onFinish, round.id, roundIndex, scores]);
+
+  useEffect(() => {
+    const delay = Math.max(0, game.startsAt - Date.now());
+    const startTimer = setTimeout(() => setStarted(true), delay);
+    const unsubscribe = game.events.subscribe((event, payload) => {
+      if (event === 'answer' || event === 'timeout') resolveRound(payload);
+    });
+    return () => {
+      unsubscribe();
+      clearTimeout(startTimer);
+    };
+  }, [game, resolveRound]);
+
+  useEffect(() => () => {
+    clearTimeout(transitionTimer.current);
+    game.channel.untrack();
+    supabase.removeChannel(game.channel);
+  }, [game.channel]);
+
+  useEffect(() => {
+    const renderGameState = () => JSON.stringify({
+      mode: 'party-team',
+      player,
+      round: roundIndex + 1,
+      totalRounds: game.rounds.length,
+      activePlayer: round.playerName,
+      activeTeam: round.team,
+      teamScores: scores,
+      question: question.q,
+      choices: question.choices,
+      answerLocked: selected !== null,
+    });
+    window.render_game_to_text = renderGameState;
+    return () => {
+      if (window.render_game_to_text === renderGameState) delete window.render_game_to_text;
+    };
+  }, [game.rounds.length, player, question, round, roundIndex, scores, selected]);
+
+  useEffect(() => {
+    if (!started || selected !== null || resolvedRounds.current.has(round.id)) return undefined;
+    const timer = setInterval(() => setTime((value) => Math.max(0, +(value - 0.1).toFixed(1))), 100);
+    return () => clearInterval(timer);
+  }, [round.id, selected, started]);
+
+  useEffect(() => {
+    if (!isLeader || time > 0 || selected !== null || resolvedRounds.current.has(round.id)) return;
+    game.channel.send({
+      type: 'broadcast',
+      event: 'party-timeout',
+      payload: {
+        roundId: round.id,
+        playerId: round.playerId,
+        playerName: round.playerName,
+        team: round.team,
+        correct: false,
+        gain: 0,
+        selected: -1,
+        timedOut: true,
+      },
+    });
+  }, [game.channel, isLeader, round, selected, time]);
+
+  function choose(index) {
+    if (!started || !isActive || selected !== null || resolvedRounds.current.has(round.id)) return;
+    const correct = index === question.answer;
+    const gain = correct ? 500 + Math.round(time * 45) : 0;
+    game.channel.send({
+      type: 'broadcast',
+      event: 'party-answer',
+      payload: {
+        roundId: round.id,
+        playerId: game.playerId,
+        playerName: round.playerName,
+        team: round.team,
+        correct,
+        gain,
+        selected: index,
+      },
+    });
+  }
+
+  return (
+    <main className="game-shell arena party-game">
+      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> PARTY TEAM · ROUND {roundIndex + 1}/{game.rounds.length}</span><button className="icon-button" aria-label="Exit party game" onClick={onExit}><X /></button></div>
+      <div className="party-scoreboard">
+        <div><small>TEAM A</small><strong>{scores.A.toLocaleString()}</strong><span>{teamA.map((member) => member.name).join(', ')}</span></div>
+        <div className="vs-badge">VS</div>
+        <div><small>TEAM B</small><strong>{scores.B.toLocaleString()}</strong><span>{teamB.map((member) => member.name).join(', ')}</span></div>
+      </div>
+      <section className="question-card">
+        <div className="question-meta"><span><BrainCircuit size={15} /> TEAM {round.team} · {round.playerName} answers</span><span className={time < 5 ? 'timer timer-low' : 'timer'}><Clock3 size={17} /> {time.toFixed(1)}s</span></div>
+        <h1>{question.q}</h1>
+        <div className="game-answers">
+          {question.choices.map((choice, index) => {
+            let state = '';
+            if (selected !== null && index === question.answer) state = 'correct';
+            else if (selected === index) state = 'wrong';
+            return <button className={state} key={`${round.id}-${choice}`} onClick={() => choose(index)} disabled={!started || !isActive || selected !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
+          })}
+        </div>
+        <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || (isActive ? 'Your turn — answer fast.' : `Waiting for ${round.playerName}.`)}</div>
+        {!started && <div className="match-countdown"><span>PARTY READY</span><strong>Get ready…</strong></div>}
+      </section>
+      <div className="party-turn-strip">
+        {game.rounds.map((item, index) => <span className={index === roundIndex ? 'active' : index < roundIndex ? 'done' : ''} key={item.id}>{item.playerName}</span>)}
+      </div>
+    </main>
+  );
+}
+
+function TournamentPartyGame({ player, game, onFinish, onExit }) {
+  const [tournament, setTournament] = useState(() => ({
+    roundNumber: 1,
+    pairs: buildTournamentPairs(game.entrants),
+    matchIndex: 0,
+    winners: [],
+    champion: null,
+  }));
+  const [time, setTime] = useState(15);
+  const [selected, setSelected] = useState(null);
+  const [feedback, setFeedback] = useState('');
+  const [duelAnswers, setDuelAnswers] = useState({});
+  const [started, setStarted] = useState(Date.now() >= game.startsAt);
+  const transitionTimer = useRef(null);
+  const resolvedDuels = useRef(new Set());
+  const answersRef = useRef({});
+  const isLeader = game.leaderId === game.playerId;
+  const pair = tournament.pairs[tournament.matchIndex] || [];
+  const duelId = `r${tournament.roundNumber}-m${tournament.matchIndex}`;
+  const questionIndex = ((tournament.roundNumber - 1) * game.entrants.length + tournament.matchIndex) % game.questions.length;
+  const question = game.questions[questionIndex];
+  const isDuelist = pair.some((member) => member.playerId === game.playerId);
+  const hasAnswered = Boolean(duelAnswers[game.playerId]);
+
+  const applyDuelResult = useCallback((payload) => {
+    if (!payload || payload.duelId !== duelId || resolvedDuels.current.has(payload.duelId)) return;
+    resolvedDuels.current.add(payload.duelId);
+    setFeedback(payload.bye ? `${payload.winner.name} gets a bye.` : `${payload.winner.name} wins this duel.`);
+    transitionTimer.current = setTimeout(() => {
+      const finishPayload = tournament.pairs.length === 1 && tournament.winners.length === 0
+        ? {
+            type: 'party-tournament',
+            score: payload.winner.playerId === game.playerId ? 1 : 0,
+            opponentScore: payload.winner.playerId === game.playerId ? 0 : 1,
+            champion: payload.winner.name,
+            summary: `${payload.winner.name} is the party tournament champion.`,
+          }
+        : null;
+      setTournament((current) => {
+        const nextWinners = [...current.winners, payload.winner];
+        const nextMatchIndex = current.matchIndex + 1;
+        if (nextMatchIndex < current.pairs.length) {
+          return { ...current, winners: nextWinners, matchIndex: nextMatchIndex };
+        }
+        if (nextWinners.length === 1) {
+          return { ...current, winners: nextWinners, champion: payload.winner };
+        }
+        return {
+          roundNumber: current.roundNumber + 1,
+          pairs: buildTournamentPairs(nextWinners),
+          matchIndex: 0,
+          winners: [],
+          champion: null,
+        };
+      });
+      setTime(15);
+      setSelected(null);
+      setFeedback('');
+      setDuelAnswers({});
+      answersRef.current = {};
+      if (finishPayload) onFinish(finishPayload);
+    }, 1200);
+  }, [duelId, game.playerId, onFinish, tournament.pairs.length, tournament.winners.length]);
+
+  const resolveDuelAsLeader = useCallback((reason = 'answered') => {
+    if (!isLeader || resolvedDuels.current.has(duelId) || pair.length === 0) return;
+    if (pair.length === 1) {
+      game.channel.send({ type: 'broadcast', event: 'party-duel-result', payload: { duelId, winner: pair[0], bye: true } });
+      return;
+    }
+    const answers = answersRef.current;
+    const bothAnswered = pair.every((member) => answers[member.playerId]);
+    if (reason !== 'timeout' && !bothAnswered) return;
+    const ranked = pair
+      .map((member) => ({
+        member,
+        answer: answers[member.playerId] || { gain: 0, correct: false, answeredAt: Number.MAX_SAFE_INTEGER },
+      }))
+      .sort((a, b) => b.answer.gain - a.answer.gain || a.answer.answeredAt - b.answer.answeredAt || a.member.joinedAt - b.member.joinedAt);
+    game.channel.send({ type: 'broadcast', event: 'party-duel-result', payload: { duelId, winner: ranked[0].member, bye: false } });
+  }, [duelId, game.channel, isLeader, pair]);
+
+  useEffect(() => {
+    const delay = Math.max(0, game.startsAt - Date.now());
+    const startTimer = setTimeout(() => setStarted(true), delay);
+    const unsubscribe = game.events.subscribe((event, payload) => {
+      if (event === 'duel-answer' && payload?.duelId === duelId) {
+        answersRef.current = { ...answersRef.current, [payload.playerId]: payload };
+        setDuelAnswers(answersRef.current);
+        resolveDuelAsLeader('answered');
+      }
+      if (event === 'duel-result') applyDuelResult(payload);
+    });
+    return () => {
+      unsubscribe();
+      clearTimeout(startTimer);
+    };
+  }, [applyDuelResult, duelId, game, resolveDuelAsLeader]);
+
+  useEffect(() => () => {
+    clearTimeout(transitionTimer.current);
+    game.channel.untrack();
+    supabase.removeChannel(game.channel);
+  }, [game.channel]);
+
+  useEffect(() => {
+    answersRef.current = {};
+    setDuelAnswers({});
+    setSelected(null);
+    setFeedback('');
+    setTime(15);
+  }, [duelId]);
+
+  useEffect(() => {
+    const renderGameState = () => JSON.stringify({
+      mode: 'party-tournament',
+      player,
+      round: tournament.roundNumber,
+      match: tournament.matchIndex + 1,
+      duelists: pair.map((member) => member.name),
+      champion: tournament.champion?.name || null,
+      question: question.q,
+      choices: question.choices,
+      answerLocked: selected !== null,
+    });
+    window.render_game_to_text = renderGameState;
+    return () => {
+      if (window.render_game_to_text === renderGameState) delete window.render_game_to_text;
+    };
+  }, [pair, player, question, selected, tournament]);
+
+  useEffect(() => {
+    if (!started || selected !== null || resolvedDuels.current.has(duelId)) return undefined;
+    const timer = setInterval(() => setTime((value) => Math.max(0, +(value - 0.1).toFixed(1))), 100);
+    return () => clearInterval(timer);
+  }, [duelId, selected, started]);
+
+  useEffect(() => {
+    if (!started || !isLeader || resolvedDuels.current.has(duelId)) return undefined;
+    if (pair.length === 1) {
+      const byeTimer = setTimeout(() => resolveDuelAsLeader('bye'), 700);
+      return () => clearTimeout(byeTimer);
+    }
+    const timeout = setTimeout(() => resolveDuelAsLeader('timeout'), 15000);
+    return () => clearTimeout(timeout);
+  }, [duelId, isLeader, pair.length, resolveDuelAsLeader, started]);
+
+  function choose(index) {
+    if (!started || !isDuelist || hasAnswered || selected !== null || resolvedDuels.current.has(duelId)) return;
+    const correct = index === question.answer;
+    const gain = correct ? 500 + Math.round(time * 45) : 0;
+    setSelected(index);
+    setFeedback(correct ? `Locked in +${gain}` : 'Locked in — not quite.');
+    game.channel.send({
+      type: 'broadcast',
+      event: 'party-duel-answer',
+      payload: {
+        duelId,
+        playerId: game.playerId,
+        playerName: player,
+        selected: index,
+        correct,
+        gain,
+        answeredAt: Date.now(),
+      },
+    });
+  }
+
+  return (
+    <main className="game-shell arena party-game">
+      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> TOURNAMENT · ROUND {tournament.roundNumber}</span><button className="icon-button" aria-label="Exit tournament" onClick={onExit}><X /></button></div>
+      <div className="party-scoreboard tournament-board">
+        <div><small>DUELIST</small><strong>{pair[0]?.name || 'TBD'}</strong><span>{duelAnswers[pair[0]?.playerId]?.gain?.toLocaleString?.() || 'Waiting'}</span></div>
+        <div className="vs-badge">VS</div>
+        <div><small>DUELIST</small><strong>{pair[1]?.name || 'BYE'}</strong><span>{pair[1] ? (duelAnswers[pair[1].playerId]?.gain?.toLocaleString?.() || 'Waiting') : 'Auto advance'}</span></div>
+      </div>
+      <section className="question-card">
+        <div className="question-meta"><span><Medal size={15} /> {isDuelist ? 'YOUR DUEL' : 'SPECTATING DUEL'}</span><span className={time < 5 ? 'timer timer-low' : 'timer'}><Clock3 size={17} /> {time.toFixed(1)}s</span></div>
+        <h1>{question.q}</h1>
+        <div className="game-answers">
+          {question.choices.map((choice, index) => {
+            let state = '';
+            if (selected !== null && index === question.answer) state = 'correct';
+            else if (selected === index) state = 'wrong';
+            return <button className={state} key={`${duelId}-${choice}`} onClick={() => choose(index)} disabled={!started || !isDuelist || hasAnswered || selected !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
+          })}
+        </div>
+        <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || (isDuelist ? 'Answer fast. Higher score advances.' : 'Watch this 1v1 — your turn may be next.')}</div>
+        {!started && <div className="match-countdown"><span>BRACKET READY</span><strong>Get ready…</strong></div>}
+      </section>
+      <div className="party-turn-strip">
+        {game.entrants.map((entrant) => <span className={tournament.champion?.playerId === entrant.playerId ? 'active' : ''} key={entrant.playerId}>{entrant.name}</span>)}
+      </div>
+    </main>
+  );
+}
+
 function Game({ player, match, onFinish, onExit }) {
   const questions = useRef(match.questions ?? getQuestionsForMatch(match.id)).current;
   const [questionIndex, setQuestionIndex] = useState(0);
@@ -636,6 +1300,33 @@ function Game({ player, match, onFinish, onExit }) {
 }
 
 function Results({ player, opponent, result, onRematch, onHome }) {
+  if (result.type === 'party-team' || result.type === 'party-tournament') {
+    const isTournament = result.type === 'party-tournament';
+    return (
+      <main className="game-shell results-screen">
+        <Logo />
+        <div className="result-emblem win">{isTournament ? <Medal /> : <Trophy />}</div>
+        <p className="eyebrow">{isTournament ? 'TOURNAMENT COMPLETE' : 'TEAM BATTLE COMPLETE'}</p>
+        <h1>{isTournament ? `${result.champion} wins!` : result.summary}</h1>
+        <p>{isTournament ? 'The bracket is complete and the party has one champion.' : 'The party team battle finished with every player rotating through the questions.'}</p>
+        {result.teamScores && (
+          <div className="result-card">
+            <div><span className="avatar avatar-you">A</span><strong>Team A</strong><b>{result.teamScores.A.toLocaleString()}</b></div>
+            <span className="result-vs">{result.winner === 'TIE' ? 'TIE' : 'WIN'}</span>
+            <div><span className="avatar avatar-nova">B</span><strong>Team B</strong><b>{result.teamScores.B.toLocaleString()}</b></div>
+          </div>
+        )}
+        {isTournament && (
+          <div className="result-card">
+            <div><span className="avatar avatar-you">{result.champion[0].toUpperCase()}</span><strong>Champion</strong><b>{result.champion}</b></div>
+            <span className="result-vs">#1</span>
+            <div><span className="avatar avatar-nova">{player[0].toUpperCase()}</span><strong>You</strong><b>{result.champion === player ? 'Winner' : 'GG'}</b></div>
+          </div>
+        )}
+        <div className="result-actions"><button className="button" onClick={onHome}><Users size={17} /> Back to home</button><button className="button button-secondary" onClick={onHome}>Done</button></div>
+      </main>
+    );
+  }
   const won = result.score >= result.opponentScore;
   const { xpGained = 0, streak = 0, totalXp = 0 } = result.matchStats || {};
   return (
@@ -656,11 +1347,16 @@ function Results({ player, opponent, result, onRematch, onHome }) {
   );
 }
 
-function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
       {authNotice && <div className="auth-notice" role="status">{authNotice}<button onClick={onNoticeClose} aria-label="Dismiss"><X size={16} /></button></div>}
+      <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
+        <span className="leaderboard-fab-icon"><Trophy /></span>
+        <span><small>{accountRank ? `YOUR RANK · #${accountRank.rank_position}` : 'LIVE GLOBAL RANKS'}</small><strong>{accountRank ? 'Climb even higher' : 'Can you take the top spot?'}</strong></span>
+        <ChevronRight />
+      </a>
       <main>
         <section className="hero">
           <div className="hero-copy">
@@ -675,6 +1371,7 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
             <p className="hero-sub">Go head-to-head in rapid-fire STEM battles. Outsmart real opponents, climb the universal ranks, and prove your brain has game.</p>
             <div className="hero-actions">
               <button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" size={18} /> {accountName ? 'Play with my account' : 'Play as guest'}</button>
+              <button className="button button-secondary button-large" onClick={onParty}><Users size={18} /> Play with friends</button>
               {accountName ? <span className="signed-in-copy"><Check /> Signed in as <b>{accountName}</b></span> : <button className="button button-secondary button-large" onClick={onCreate}>Create account <ArrowRight size={18} /></button>}
             </div>
             <p className="fine-print"><Check size={14} /> Free to play <Check size={14} /> No download <Check size={14} /> Match in seconds</p>
@@ -683,6 +1380,20 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
         </section>
 
         <section className="ticker" aria-label="Popular STEM categories"><div><span><Atom /> PHYSICS</span><i>✦</i><span><FlaskConical /> CHEMISTRY</span><i>✦</i><span><Orbit /> SPACE</span><i>✦</i><span><BrainCircuit /> BIOLOGY</span><i>✦</i><span><Bolt /> MATHEMATICS</span></div></section>
+
+        <section className="party-section" id="party">
+          <div>
+            <p className="eyebrow">FRIENDS. TEAMS. BRACKETS.</p>
+            <h2>Build a party, then let the leader pick the format.</h2>
+            <p>Create a private code, invite friends, and play either auto-balanced XvX team battles or a 1v1 elimination tournament.</p>
+          </div>
+          <div className="party-feature-grid">
+            <article><Swords /><strong>Auto XvX split</strong><span>Odd parties give one team the extra player.</span></article>
+            <article><Shuffle /><strong>Rotating turns</strong><span>Everyone answers at least once; small parties cap at two turns each.</span></article>
+            <article><Medal /><strong>Tournament mode</strong><span>1v1 duels advance to one final winner.</span></article>
+          </div>
+          <button className="button button-large" onClick={onParty}><Users /> Create or join a party</button>
+        </section>
 
         <section className="how-section" id="how">
           <div className="section-heading"><p className="eyebrow">YOUR BRAIN. THEIR CLOCK.</p><h2>Three steps to glory.</h2><p>No tutorials. No waiting rooms. Just pure knowledge under pressure.</p></div>
@@ -696,7 +1407,7 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
         <section className="leader-section" id="leaderboard">
           <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every account has a global rank. Scores from signed-in battles move that rank; guest battles count toward the match total but are not attached to an account.</p><div className="rank-stat"><Trophy /><span><b>{gamesPlayed === null ? 'Loading live total…' : `${gamesPlayed.toLocaleString()} matches completed`}</b><small>Verified from recorded match IDs</small></span></div><button className="button button-light" onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'Play a ranked match' : 'Claim your rank'} <ArrowRight /></button></div>
           <div className="leaderboard-card">
-            <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>ALL TIME</span></div>
+            <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>ALL-TIME RANKS</span></div>
             <div className="leader-cols"><span>RANK & ACCOUNT</span><span>WINS</span><span>SCORE</span></div>
             {Array.isArray(leaders) && leaders.map((leader) => <div className="leader-row" key={leader.id}><span className={leader.rank_position <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank_position}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{leader.rank_position === 1 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
             {leaders === null && <div className="leader-empty"><Globe2 /><strong>Loading live rankings…</strong><span>Connecting to the global leaderboard.</span></div>}
@@ -723,7 +1434,9 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
+  const [guestDestination, setGuestDestination] = useState('matchmaking');
   const { onlineCount, gamesPlayed, registeredUsers, leaders, accountRank } = useLiveStats(session?.user?.id);
+  const partyLinkHandled = useRef(false);
   const fromConfirmLink = useRef(
     window.location.hash.includes('access_token') ||
     Boolean(new URLSearchParams(window.location.search).get('code'))
@@ -741,6 +1454,7 @@ export default function App() {
   }, [match?.id]);
 
   useEffect(() => {
+    if (screen === 'game' || screen === 'party-game') return undefined;
     const renderAppState = () => JSON.stringify({
       mode: screen,
       player: player || null,
@@ -774,17 +1488,42 @@ export default function App() {
     || session?.user?.email?.split('@')[0]
     || '';
 
-  function start(name) { setPlayer(name); setModal(null); setScreen('matchmaking'); }
+  useEffect(() => {
+    if (partyLinkHandled.current || !getPartyCodeFromUrl() || !authReady) return;
+    partyLinkHandled.current = true;
+    if (accountName) {
+      start(accountName, 'party');
+      return;
+    }
+    setGuestDestination('party');
+    setModal('guest');
+  }, [accountName, authReady]);
+
+  function start(name, destination = 'matchmaking') { setPlayer(name); setModal(null); setScreen(destination); }
   function playAccount() { if (accountName) start(accountName); else setModal('login'); }
+  function playParty() {
+    if (accountName) {
+      start(accountName, 'party');
+      return;
+    }
+    setGuestDestination('party');
+    setModal('guest');
+  }
+  function playGuest() {
+    setGuestDestination('matchmaking');
+    setModal('guest');
+  }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
   function home() { setScreen('landing'); setResult(null); setMatch(null); setOpponent(''); }
   async function logout() { await supabase?.auth.signOut(); home(); }
 
   if (screen === 'matchmaking') return <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
+  if (screen === 'party') return <PartyRoom name={player} onStartGame={(partyGame) => { setMatch(partyGame); setScreen('party-game'); }} onCancel={home} />;
+  if (screen === 'party-game' && match) return <PartyGame player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={home} />;
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <>
-    <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
-    {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
+    <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => setModal(null)} onGuestStart={(name) => start(name, guestDestination)} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 }
