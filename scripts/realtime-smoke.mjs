@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { getQuestionsForMatch } from '../src/data/questions.js';
 
-const fingerprint = (questions) => (questions ?? []).map((item) => item.q).join(' | ');
+const fingerprint = (questions) =>
+  (questions ?? []).map((item) => `${item.q}#${item.answer}[${item.choices.join(',')}]`).join(' | ');
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;

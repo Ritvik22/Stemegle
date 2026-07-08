@@ -684,6 +684,13 @@ function shuffled(items, random) {
   return result;
 }
 
+function withShuffledChoices(item, random) {
+  const correct = item.choices[item.answer];
+  const choices = shuffled(item.choices, random);
+  // Returns a fresh object so the shared QUESTION_BANK entry is never mutated.
+  return { ...item, choices, answer: choices.indexOf(correct) };
+}
+
 export function getQuestionsForMatch(matchId, count = 5) {
   const random = createRandom(hashSeed(matchId));
   const categories = shuffled([...new Set(QUESTION_BANK.map((item) => item.category))], random);
@@ -691,7 +698,9 @@ export function getQuestionsForMatch(matchId, count = 5) {
 
   for (const category of categories) {
     const categoryQuestions = QUESTION_BANK.filter((item) => item.category === category);
-    selected.push(shuffled(categoryQuestions, random)[0]);
+    // Shuffle both which question is picked and the order of its answer choices,
+    // seeded by matchId so both paired players get the identical arrangement.
+    selected.push(withShuffledChoices(shuffled(categoryQuestions, random)[0], random));
     if (selected.length === count) break;
   }
 
