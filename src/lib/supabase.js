@@ -27,20 +27,37 @@ export function getPresencePlayers(channel) {
 
 export async function fetchGamesPlayed() {
   if (!supabase) return null;
-  try {
-    const { data, error } = await supabase
-      .from('global_stats')
-      .select('value')
-      .eq('key', 'games_played')
-      .single();
-    if (error) return null;
-    return data?.value ?? null;
-  } catch { return null; }
+  const { count, error } = await supabase
+    .from('matches')
+    .select('*', { count: 'exact', head: true });
+  return error ? null : count;
 }
 
-export async function incrementGamesPlayed() {
-  if (!supabase) return;
-  try {
-    await supabase.rpc('increment_games_played');
-  } catch { /* table may not exist yet */ }
+export async function fetchLeaderboard() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id,battle_name,total_score,wins,matches_played,streak')
+    .gt('matches_played', 0)
+    .order('total_score', { ascending: false })
+    .order('wins', { ascending: false })
+    .order('updated_at', { ascending: true })
+    .limit(10);
+  return error ? [] : data;
+}
+
+export async function recordMatchResult(matchId, score, opponentScore) {
+  if (!supabase || !matchId) return null;
+  const { data, error } = await supabase.rpc('record_match_result', {
+    p_match_id: matchId,
+    p_score: score,
+    p_opponent_score: opponentScore,
+  });
+  if (error) throw error;
+  const stats = data?.[0];
+  return stats ? {
+    xpGained: stats.score_gained,
+    streak: stats.current_streak,
+    totalXp: stats.total_score,
+  } : null;
 }

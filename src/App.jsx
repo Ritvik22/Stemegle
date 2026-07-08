@@ -24,16 +24,8 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { fetchGamesPlayed, getPresencePlayers, hasRealtimeConfig, incrementGamesPlayed, supabase } from './lib/supabase';
+import { fetchGamesPlayed, fetchLeaderboard, getPresencePlayers, hasRealtimeConfig, recordMatchResult, supabase } from './lib/supabase';
 import { getQuestionsForMatch } from './data/questions';
-
-const LEADERS = [
-  { rank: 1, name: 'NovaNerd', xp: '18,942', streak: 14, color: '#b7ff5a' },
-  { rank: 2, name: 'QuantumQuinn', xp: '18,105', streak: 9, color: '#73ddff' },
-  { rank: 3, name: 'AstroAce', xp: '17,870', streak: 7, color: '#ffab73' },
-  { rank: 4, name: 'PiRates', xp: '16,442', streak: 6, color: '#cf9cff' },
-  { rank: 5, name: 'BioBoss', xp: '15,997', streak: 4, color: '#ff7ca8' },
-];
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
 
@@ -49,11 +41,19 @@ const VISITOR_ID = (() => {
 function useLiveStats() {
   const [onlineCount, setOnlineCount] = useState(null);
   const [gamesPlayed, setGamesPlayed] = useState(null);
+  const [leaders, setLeaders] = useState([]);
 
   useEffect(() => {
     if (!supabase) return undefined;
 
-    fetchGamesPlayed().then((count) => { if (count !== null) setGamesPlayed(count); });
+    let active = true;
+    const refreshStats = async () => {
+      const [count, leaderboard] = await Promise.all([fetchGamesPlayed(), fetchLeaderboard()]);
+      if (!active) return;
+      if (count !== null) setGamesPlayed(count);
+      setLeaders(leaderboard);
+    };
+    refreshStats();
 
     const visitorsChannel = supabase.channel('stemegle:visitors', {
       config: { presence: { key: VISITOR_ID } },
@@ -70,25 +70,28 @@ function useLiveStats() {
       });
 
     const statsChannel = supabase
-      .channel('stemegle:global-stats')
+      .channel('stemegle:ranked-stats')
       .on('postgres_changes', {
-        event: 'UPDATE',
+        event: 'INSERT',
         schema: 'public',
-        table: 'global_stats',
-        filter: 'key=eq.games_played',
-      }, (payload) => {
-        setGamesPlayed(payload.new.value);
-      })
+        table: 'matches',
+      }, refreshStats)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'profiles',
+      }, refreshStats)
       .subscribe();
 
     return () => {
+      active = false;
       visitorsChannel.untrack();
       supabase.removeChannel(visitorsChannel);
       supabase.removeChannel(statsChannel);
     };
   }, []);
 
-  return { onlineCount, gamesPlayed };
+  return { onlineCount, gamesPlayed, leaders };
 }
 
 function createPlayerId() {
@@ -129,17 +132,17 @@ function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPl
 function BattleCard() {
   return (
     <div className="battle-wrap" aria-label="Preview of a live Stemegle battle">
-      <div className="float-chip chip-one"><FlaskConical size={16} /> Chemistry streak!</div>
-      <div className="float-chip chip-two"><Zap size={16} /> +240 XP</div>
+      <div className="float-chip chip-one"><FlaskConical size={16} /> Chemistry challenge</div>
+      <div className="float-chip chip-two"><Zap size={16} /> Speed bonus</div>
       <div className="battle-card">
-        <div className="battle-topline"><span className="live-pill"><i /> LIVE BATTLE</span><span>Question 3 of 5</span></div>
+        <div className="battle-topline"><span className="live-pill"><i /> BATTLE PREVIEW</span><span>THINK FAST</span></div>
         <div className="players">
-          <div className="player"><span className="avatar avatar-you">Y</span><div><strong>You</strong><small>1,240 pts</small></div></div>
+          <div className="player"><span className="avatar avatar-you">Y</span><div><strong>You</strong><small>Ready</small></div></div>
           <div className="versus">VS</div>
-          <div className="player opponent"><div><strong>NovaNerd</strong><small>980 pts</small></div><span className="avatar avatar-nova">N</span></div>
+          <div className="player opponent"><div><strong>Live rival</strong><small>Ready</small></div><span className="avatar avatar-nova">R</span></div>
         </div>
         <div className="question-preview">
-          <div className="question-meta"><span><Bolt size={14} /> PHYSICS</span><span className="mini-timer"><Clock3 size={14} /> 08.4s</span></div>
+          <div className="question-meta"><span><Bolt size={14} /> PHYSICS</span><span className="mini-timer"><Clock3 size={14} /> SPEED COUNTS</span></div>
           <h3>What is the SI unit of force?</h3>
           <div className="answer-grid">
             <button>Joule</button><button className="answer-selected"><Check size={17} /> Newton</button><button>Watt</button><button>Pascal</button>
@@ -633,13 +636,13 @@ function Results({ player, opponent, result, onRematch, onHome }) {
         <span className="result-vs">{won ? 'WIN' : 'GG'}</span>
         <div><span className="avatar avatar-nova">{opponent[0]}</span><strong>{opponent}</strong><b>{result.opponentScore.toLocaleString()}</b></div>
       </div>
-      <div className="reward-row"><span><Zap /> +{xpGained} XP</span><span><BarChart3 /> {totalXp.toLocaleString()} total XP</span><span><Bolt /> {streak} streak</span></div>
+      {result.matchStats && <div className="reward-row"><span><Zap /> +{xpGained} score</span><span><BarChart3 /> {totalXp.toLocaleString()} total score</span><span><Bolt /> {streak} streak</span></div>}
       <div className="result-actions"><button className="button" onClick={onRematch}><Play size={17} /> Play again</button><button className="button button-secondary" onClick={onHome}>Back home</button></div>
     </main>
   );
 }
 
-function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPlayed, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPlayed, leaders, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
@@ -648,9 +651,9 @@ function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPla
         <section className="hero">
           <div className="hero-copy">
             <div className="social-proof">
-              <span className="proof-faces"><i>N</i><i>Q</i><i>A</i></span>
+              <Globe2 size={22} />
               <span>{onlineCount !== null ? <><b>{onlineCount.toLocaleString()}</b> online now</> : <><b>Live</b> matchmaking is online</>}</span>
-              {gamesPlayed !== null && <span className="games-played-chip"><Zap size={12} /> <b>{gamesPlayed.toLocaleString()}</b> games played</span>}
+              {gamesPlayed !== null && <span className="games-played-chip"><Zap size={12} /> <b>{gamesPlayed.toLocaleString()}</b> matches completed all time</span>}
             </div>
             <p className="eyebrow">REAL-TIME STEM SHOWDOWNS</p>
             <h1>Think fast.<br />Win <em>faster.</em></h1>
@@ -676,12 +679,13 @@ function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPla
         </section>
 
         <section className="leader-section" id="leaderboard">
-          <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every battle counts toward one universal leaderboard. Season One is live—and the top spot is still up for grabs.</p><div className="rank-stat"><Crown /><span><b>Season 01</b><small>Ends in 18 days</small></span></div><button className="button button-light" onClick={onCreate}>Claim your rank <ArrowRight /></button></div>
+          <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every completed account battle adds its earned score to one universal, live leaderboard.</p><div className="rank-stat"><Trophy /><span><b>{gamesPlayed === null ? 'Loading live total…' : `${gamesPlayed.toLocaleString()} matches completed`}</b><small>Verified from recorded match IDs</small></span></div><button className="button button-light" onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'Play a ranked match' : 'Claim your rank'} <ArrowRight /></button></div>
           <div className="leaderboard-card">
-            <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>Season 01</span></div>
-            <div className="leader-cols"><span>RANK & PLAYER</span><span>STREAK</span><span>XP</span></div>
-            {LEADERS.map((leader) => <div className="leader-row" key={leader.name}><span className={leader.rank <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank}</span><span className="leader-avatar" style={{ background: leader.color }}>{leader.name[0]}</span><strong>{leader.name}{leader.rank === 1 && <Crown size={14} />}</strong><span className="streak"><Zap size={14} fill="currentColor" /> {leader.streak}</span><b>{leader.xp}</b></div>)}
-            <div className="your-rank"><span>12,482</span><span className="leader-avatar">Y</span><strong>You could be here</strong><button onClick={onGuest}>PLAY NOW <ArrowRight /></button></div>
+            <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>ALL TIME</span></div>
+            <div className="leader-cols"><span>RANK & ACCOUNT</span><span>WINS</span><span>SCORE</span></div>
+            {leaders.map((leader, index) => <div className="leader-row" key={leader.id}><span className={index < 3 ? 'leader-rank top' : 'leader-rank'}>{index + 1}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{index === 0 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
+            {leaders.length === 0 && <div className="leader-empty"><Trophy /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
+            <div className="your-rank"><span>—</span><span className="leader-avatar">{accountName ? accountName[0].toUpperCase() : 'Y'}</span><strong>{accountName ? 'Complete a match to update your rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
           </div>
         </section>
 
@@ -690,25 +694,6 @@ function Landing({ accountName, authNotice, onNoticeClose, onlineCount, gamesPla
       <footer><Logo /><p>Competitive STEM for curious minds everywhere.</p><span>© 2026 Stemegle</span></footer>
     </div>
   );
-}
-
-function getStats() {
-  try { return JSON.parse(localStorage.getItem('stemegle_stats') || '{}'); }
-  catch { return {}; }
-}
-
-function recordMatch(won, score) {
-  const stats = getStats();
-  const xpGained = Math.round(score / 10) + (won ? 50 : 10);
-  const newStreak = won ? (stats.streak || 0) + 1 : 0;
-  const updated = {
-    xp: (stats.xp || 0) + xpGained,
-    streak: newStreak,
-    wins: (stats.wins || 0) + (won ? 1 : 0),
-    matches: (stats.matches || 0) + 1,
-  };
-  localStorage.setItem('stemegle_stats', JSON.stringify(updated));
-  return { xpGained, streak: newStreak, totalXp: updated.xp };
 }
 
 export default function App() {
@@ -721,19 +706,22 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
-  const { onlineCount, gamesPlayed } = useLiveStats();
+  const { onlineCount, gamesPlayed, leaders } = useLiveStats();
   const fromConfirmLink = useRef(
     window.location.hash.includes('access_token') ||
     Boolean(new URLSearchParams(window.location.search).get('code'))
   );
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
-  const handleFinish = useCallback((data) => {
-    const won = data.score >= data.opponentScore;
-    const matchStats = recordMatch(won, data.score);
+  const handleFinish = useCallback(async (data) => {
+    let matchStats = null;
+    try {
+      matchStats = await recordMatchResult(match?.id, data.score, data.opponentScore);
+    } catch (error) {
+      console.error('Could not persist match result', error);
+    }
     setResult({ ...data, matchStats });
     setScreen('results');
-    incrementGamesPlayed();
-  }, []);
+  }, [match?.id]);
 
   useEffect(() => {
     const renderAppState = () => JSON.stringify({
@@ -779,7 +767,7 @@ export default function App() {
   if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
   return <>
-    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
+    <Landing accountName={authReady ? accountName : ''} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} leaders={leaders} onGuest={() => setModal('guest')} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
     {modal && <EntryModal mode={modal} onClose={() => setModal(null)} onGuestStart={start} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 }
