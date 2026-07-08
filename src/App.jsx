@@ -28,6 +28,7 @@ import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePl
 import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
+const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || 'https://stemegle.vercel.app';
 
 const VISITOR_ID = (() => {
   const key = 'stemegle_vid';
@@ -211,7 +212,7 @@ function EntryModal({ mode, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
         password,
         options: {
           data: { battle_name: name.trim() },
-          emailRedirectTo: window.location.origin,
+          emailRedirectTo: AUTH_REDIRECT_URL,
         },
       });
       if (signUpError) throw signUpError;
