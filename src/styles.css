@@ -148,11 +148,14 @@ footer { border-top: 1px solid var(--line); min-height: 100px; max-width: 1180px
 }
 
 .party-footer-actions{display:flex;justify-content:center;gap:26px}.party-footer-actions .text-button{margin-top:26px;color:#5d6f66}.party-footer-actions .text-button:disabled{opacity:.45;cursor:not-allowed}
-.party-pill{position:fixed;right:20px;bottom:20px;z-index:60;display:grid;grid-template-columns:40px 1fr 18px;align-items:center;gap:11px;text-align:left;background:var(--ink);color:white;border:1.5px solid var(--ink);border-radius:14px;padding:10px 14px 10px 10px;box-shadow:4px 4px 0 var(--green);transition:transform .18s,box-shadow .18s;cursor:pointer}
-.party-pill:hover{transform:translate(2px,2px);box-shadow:2px 2px 0 var(--green)}
+.party-pill{position:fixed;right:20px;top:20px;z-index:120;display:flex;align-items:stretch;background:var(--ink);color:white;border:1.5px solid var(--ink);border-radius:14px;box-shadow:4px 4px 0 var(--green);overflow:hidden}
+.party-pill-main{display:grid;grid-template-columns:40px 1fr 18px;align-items:center;gap:11px;text-align:left;background:none;border:0;color:inherit;padding:10px 14px 10px 10px;cursor:pointer;transition:background .18s}
+.party-pill-main:hover{background:#1b3327}
 .party-pill-icon{width:40px;height:40px;border-radius:11px;background:var(--green);color:var(--ink);border:1px solid var(--ink);display:grid;place-items:center}
 .party-pill-text small{display:flex;align-items:center;gap:5px;font:900 8.5px 'Manrope';letter-spacing:1.2px;color:var(--green);margin-bottom:2px}
 .party-pill-text small i{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.6s ease-in-out infinite}
 .party-pill-text strong{display:block;font:800 14px 'Manrope';letter-spacing:-.2px}
-.party-pill>svg{color:#9fb2a9}
-@media (max-width: 680px){.party-pill{right:14px;left:auto;bottom:84px}}
+.party-pill-main>svg{color:#9fb2a9}
+.party-pill-leave{border:0;border-left:1.5px solid #33493f;background:none;color:#9fb2a9;padding:0 12px;cursor:pointer;display:grid;place-items:center;transition:background .18s,color .18s}
+.party-pill-leave:hover{background:#3a1f1f;color:#ff9b86}
+@media (max-width: 680px){.party-pill{right:14px;left:auto;top:14px}}

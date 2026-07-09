@@ -892,13 +892,16 @@ function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onL
   );
 }
 
-function PartyPill({ code, count, onReturn }) {
+function PartyPill({ code, count, onReturn, onLeave }) {
   return (
-    <button className="party-pill" onClick={onReturn} aria-label={`You are in party ${code} with ${count} ${count === 1 ? 'player' : 'players'}. Return to the party.`}>
-      <span className="party-pill-icon"><Users size={17} /></span>
-      <span className="party-pill-text"><small><i /> IN PARTY · {count} {count === 1 ? 'PLAYER' : 'PLAYERS'}</small><strong>Party {code}</strong></span>
-      <ArrowRight size={16} />
-    </button>
+    <div className="party-pill">
+      <button className="party-pill-main" onClick={onReturn} aria-label={`You are in party ${code} with ${count} ${count === 1 ? 'player' : 'players'}. Return to the party.`}>
+        <span className="party-pill-icon"><Users size={17} /></span>
+        <span className="party-pill-text"><small><i /> IN PARTY · {count} {count === 1 ? 'PLAYER' : 'PLAYERS'}</small><strong>Party {code}</strong></span>
+        <ArrowRight size={16} />
+      </button>
+      <button className="party-pill-leave" onClick={onLeave} aria-label="Leave party" title="Leave party"><X size={15} /></button>
+    </div>
   );
 }
 
@@ -1697,6 +1700,6 @@ export default function App() {
 
   return <>
     {content}
-    {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} />}
+    {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={leaveParty} />}
   </>;
 }
