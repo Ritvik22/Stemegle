@@ -37,9 +37,11 @@ const LOBBY_CHANNEL = 'stemegle:lobby:v1';
 const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || window.location.origin;
 const PARTY_PREFIX = 'stemegle:party:';
 const PARTY_CODE_LENGTH = 5;
-const PARTY_HEARTBEAT_INTERVAL_MS = 2000;
-const PARTY_HEARTBEAT_STALE_MS = 7000;
-const PARTY_LEADER_HEARTBEAT_GRACE_MS = 15000;
+const PARTY_HEARTBEAT_INTERVAL_MS = 5000;
+// Background tabs throttle timers to ~1/minute, so anything under ~2 minutes
+// risks kicking players who simply switched tabs. Supabase presence removes
+// truly disconnected players much sooner; this is only a zombie-tab backstop.
+const PARTY_PRESENCE_STALE_MS = 130000;
 
 const VISITOR_ID = (() => {
   const key = 'stemegle_vid';
@@ -189,9 +191,7 @@ function electPartyLeader(players) {
   if (!players.length) return '';
   const creator = players.find((player) => player.partyLeader);
   if (creator) return creator.playerId;
-  return [...players]
-    .sort((a, b) => a.playerId.localeCompare(b.playerId))[0]
-    .playerId;
+  return [...players].sort(comparePartyPlayers)[0].playerId;
 }
 
 function createTeamPartyConfig(partyCode, players, leaderId) {
@@ -647,10 +647,16 @@ function PartyRoom({ name, onStartGame, onCancel }) {
   const channelRef = useRef(null);
   const eventsRef = useRef(createEventBus());
   const heartbeatsRef = useRef({});
-  const seenPlayersRef = useRef({});
   const joinedAtRef = useRef(Date.now());
   const handedOffToGame = useRef(false);
   const createdPartyCode = useRef('');
+  const nameRef = useRef(name);
+  const onStartGameRef = useRef(onStartGame);
+
+  useEffect(() => {
+    nameRef.current = name;
+    onStartGameRef.current = onStartGame;
+  });
 
   const isLeader = leaderId === playerId.current;
   const teamPreview = players.length >= 2 ? splitPartyTeams(players) : [];
@@ -665,7 +671,6 @@ function PartyRoom({ name, onStartGame, onCancel }) {
     setStatus('connecting');
     setError('');
     heartbeatsRef.current = {};
-    seenPlayersRef.current = {};
     joinedAtRef.current = Date.now();
     const channel = supabase.channel(`${PARTY_PREFIX}${partyCode}`, {
       config: {
@@ -675,38 +680,48 @@ function PartyRoom({ name, onStartGame, onCancel }) {
     });
     channelRef.current = channel;
 
+    const selfPresence = (at) => ({
+      playerId: playerId.current,
+      name: nameRef.current,
+      joinedAt: joinedAtRef.current,
+      partyLeader: createdPartyCode.current === partyCode,
+      lastSeen: at,
+    });
+
     const refreshPresence = () => {
       const roster = getPartyRoster(channel);
       const now = Date.now();
-      const seenPlayers = { ...seenPlayersRef.current };
+      const observed = heartbeatsRef.current;
+      // Staleness is judged by the local time we last saw a player's heartbeat
+      // change — never by their clock, which can be skewed past the stale window.
       roster.forEach((partyPlayer) => {
-        if (!seenPlayers[partyPlayer.playerId]) seenPlayers[partyPlayer.playerId] = now;
-      });
-      seenPlayersRef.current = seenPlayers;
-      const liveRoster = roster.filter((partyPlayer) => {
-        const lastHeartbeat = partyPlayer.lastSeen ?? heartbeatsRef.current[partyPlayer.playerId];
-        if (!lastHeartbeat && partyPlayer.partyLeader) {
-          const firstSeen = seenPlayersRef.current[partyPlayer.playerId] ?? now;
-          return now - firstSeen <= PARTY_LEADER_HEARTBEAT_GRACE_MS;
+        const entry = observed[partyPlayer.playerId];
+        if (!entry || entry.stamp !== partyPlayer.lastSeen) {
+          observed[partyPlayer.playerId] = { stamp: partyPlayer.lastSeen, at: now };
         }
-        const lastSeen = lastHeartbeat ?? seenPlayersRef.current[partyPlayer.playerId] ?? now;
-        return now - lastSeen <= PARTY_HEARTBEAT_STALE_MS;
       });
+      const liveRoster = roster.filter((partyPlayer) => {
+        if (partyPlayer.playerId === playerId.current) return true;
+        const entry = observed[partyPlayer.playerId];
+        return now - (entry?.at ?? now) <= PARTY_PRESENCE_STALE_MS;
+      });
+      // Presence sync can lag our own track(); keep ourselves in the roster so
+      // the party never renders empty or leaderless for the local player.
+      if (!liveRoster.some((partyPlayer) => partyPlayer.playerId === playerId.current)) {
+        liveRoster.push(selfPresence(now));
+        liveRoster.sort(comparePartyPlayers);
+      }
       setPlayers(liveRoster);
       setLeaderId(electPartyLeader(liveRoster));
     };
 
     const sendHeartbeat = () => {
-      const at = Date.now();
-      heartbeatsRef.current = { ...heartbeatsRef.current, [playerId.current]: at };
-      channel.track({
-        playerId: playerId.current,
-        name,
-        joinedAt: joinedAtRef.current,
-        partyLeader: createdPartyCode.current === partyCode,
-        lastSeen: at,
-      });
+      channel.track(selfPresence(Date.now()));
       refreshPresence();
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') sendHeartbeat();
     };
 
     channel
@@ -714,7 +729,7 @@ function PartyRoom({ name, onStartGame, onCancel }) {
       .on('broadcast', { event: 'party-start' }, ({ payload }) => {
         if (!active || !payload?.config) return;
         handedOffToGame.current = true;
-        onStartGame({
+        onStartGameRef.current({
           ...payload.config,
           channel,
           events: eventsRef.current,
@@ -725,18 +740,9 @@ function PartyRoom({ name, onStartGame, onCancel }) {
       .on('broadcast', { event: 'party-timeout' }, ({ payload }) => eventsRef.current.emit('timeout', payload))
       .on('broadcast', { event: 'party-duel-answer' }, ({ payload }) => eventsRef.current.emit('duel-answer', payload))
       .on('broadcast', { event: 'party-duel-result' }, ({ payload }) => eventsRef.current.emit('duel-result', payload))
-      .subscribe(async (subscriptionStatus) => {
+      .subscribe((subscriptionStatus) => {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('ready');
-          const lastSeen = Date.now();
-          heartbeatsRef.current = { ...heartbeatsRef.current, [playerId.current]: lastSeen };
-          await channel.track({
-            playerId: playerId.current,
-            name,
-            joinedAt: joinedAtRef.current,
-            partyLeader: createdPartyCode.current === partyCode,
-            lastSeen,
-          });
           sendHeartbeat();
         }
         if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
@@ -746,20 +752,23 @@ function PartyRoom({ name, onStartGame, onCancel }) {
       });
 
     const heartbeatTimer = setInterval(sendHeartbeat, PARTY_HEARTBEAT_INTERVAL_MS);
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       active = false;
       clearInterval(heartbeatTimer);
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (!handedOffToGame.current) {
         channel.untrack();
         supabase.removeChannel(channel);
         if (channelRef.current === channel) channelRef.current = null;
       }
     };
-  // Keep the subscription bound only to this party code. Presence sync owns the
-  // live roster/leader state after the first track payload.
+  // The channel must live for as long as the party code is active. `name` and
+  // `onStartGame` are read through refs so parent re-renders (live stats, etc.)
+  // never tear down the subscription — that teardown is what kicked players.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [partyCode, name, onStartGame]);
+  }, [partyCode]);
 
   function createParty() {
     if (!hasRealtimeConfig) return;
