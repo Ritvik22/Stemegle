@@ -27,12 +27,12 @@ export APP_DOCKERFILE="${APP_DOCKERFILE:-../Dockerfile}"
 docker compose up -d --build app
 
 for attempt in {1..30}; do
-  if curl -fsSI "http://127.0.0.1:${STEMEGLE_PORT:-8097}/" >/dev/null; then
-    echo "Stemegle is healthy on 127.0.0.1:${STEMEGLE_PORT:-8097}"
+  if curl -fsSI "http://app/" >/dev/null; then
+    echo "Stemegle is healthy on the app service"
     exit 0
   fi
   sleep 2
 done
 
-echo "Stemegle did not become healthy on 127.0.0.1:${STEMEGLE_PORT:-8097}" >&2
+echo "Stemegle did not become healthy on the app service" >&2
 exit 1
