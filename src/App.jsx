@@ -34,7 +34,7 @@ import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePl
 import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
-const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || 'https://stemegle.vercel.app';
+const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || window.location.origin;
 const PARTY_PREFIX = 'stemegle:party:';
 const PARTY_CODE_LENGTH = 5;
 
