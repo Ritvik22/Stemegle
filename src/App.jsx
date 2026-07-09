@@ -37,6 +37,9 @@ const LOBBY_CHANNEL = 'stemegle:lobby:v1';
 const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || window.location.origin;
 const PARTY_PREFIX = 'stemegle:party:';
 const PARTY_CODE_LENGTH = 5;
+const PARTY_HEARTBEAT_INTERVAL_MS = 2000;
+const PARTY_HEARTBEAT_STALE_MS = 7000;
+const PARTY_LEADER_HEARTBEAT_GRACE_MS = 15000;
 
 const VISITOR_ID = (() => {
   const key = 'stemegle_vid';
@@ -147,13 +150,48 @@ function getPartyQuestions(seed, count) {
   return questions.slice(0, count);
 }
 
+function comparePartyPlayers(a, b) {
+  const joinedA = Number.isFinite(a.joinedAt) ? a.joinedAt : Number.MAX_SAFE_INTEGER;
+  const joinedB = Number.isFinite(b.joinedAt) ? b.joinedAt : Number.MAX_SAFE_INTEGER;
+  return joinedA - joinedB || a.playerId.localeCompare(b.playerId);
+}
+
 function splitPartyTeams(players) {
-  const ordered = [...players].sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+  const ordered = [...players].sort(comparePartyPlayers);
   const teamASize = Math.ceil(ordered.length / 2);
   return ordered.map((player, index) => ({
     ...player,
     team: index < teamASize ? 'A' : 'B',
   }));
+}
+
+function getPartyRoster(channel) {
+  const uniquePlayers = new Map();
+  getPresencePlayers(channel).forEach((presence) => {
+    const existing = uniquePlayers.get(presence.playerId);
+    if (!existing) {
+      uniquePlayers.set(presence.playerId, presence);
+      return;
+    }
+    uniquePlayers.set(presence.playerId, {
+      ...existing,
+      ...presence,
+      joinedAt: Math.min(existing.joinedAt ?? Date.now(), presence.joinedAt ?? Date.now()),
+      lastSeen: Math.max(existing.lastSeen ?? 0, presence.lastSeen ?? 0) || undefined,
+      partyLeader: Boolean(existing.partyLeader || presence.partyLeader),
+    });
+  });
+  return [...uniquePlayers.values()]
+    .sort(comparePartyPlayers);
+}
+
+function electPartyLeader(players) {
+  if (!players.length) return '';
+  const creator = players.find((player) => player.partyLeader);
+  if (creator) return creator.playerId;
+  return [...players]
+    .sort((a, b) => a.playerId.localeCompare(b.playerId))[0]
+    .playerId;
 }
 
 function createTeamPartyConfig(partyCode, players, leaderId) {
@@ -608,6 +646,9 @@ function PartyRoom({ name, onStartGame, onCancel }) {
   const playerId = useRef(createPlayerId());
   const channelRef = useRef(null);
   const eventsRef = useRef(createEventBus());
+  const heartbeatsRef = useRef({});
+  const seenPlayersRef = useRef({});
+  const joinedAtRef = useRef(Date.now());
   const handedOffToGame = useRef(false);
   const createdPartyCode = useRef('');
 
@@ -623,6 +664,9 @@ function PartyRoom({ name, onStartGame, onCancel }) {
     let active = true;
     setStatus('connecting');
     setError('');
+    heartbeatsRef.current = {};
+    seenPlayersRef.current = {};
+    joinedAtRef.current = Date.now();
     const channel = supabase.channel(`${PARTY_PREFIX}${partyCode}`, {
       config: {
         presence: { key: playerId.current },
@@ -632,11 +676,37 @@ function PartyRoom({ name, onStartGame, onCancel }) {
     channelRef.current = channel;
 
     const refreshPresence = () => {
-      const roster = getPresencePlayers(channel)
-        .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
-      const creator = roster.find((player) => player.partyLeader);
-      setPlayers(roster);
-      setLeaderId(creator?.playerId || '');
+      const roster = getPartyRoster(channel);
+      const now = Date.now();
+      const seenPlayers = { ...seenPlayersRef.current };
+      roster.forEach((partyPlayer) => {
+        if (!seenPlayers[partyPlayer.playerId]) seenPlayers[partyPlayer.playerId] = now;
+      });
+      seenPlayersRef.current = seenPlayers;
+      const liveRoster = roster.filter((partyPlayer) => {
+        const lastHeartbeat = partyPlayer.lastSeen ?? heartbeatsRef.current[partyPlayer.playerId];
+        if (!lastHeartbeat && partyPlayer.partyLeader) {
+          const firstSeen = seenPlayersRef.current[partyPlayer.playerId] ?? now;
+          return now - firstSeen <= PARTY_LEADER_HEARTBEAT_GRACE_MS;
+        }
+        const lastSeen = lastHeartbeat ?? seenPlayersRef.current[partyPlayer.playerId] ?? now;
+        return now - lastSeen <= PARTY_HEARTBEAT_STALE_MS;
+      });
+      setPlayers(liveRoster);
+      setLeaderId(electPartyLeader(liveRoster));
+    };
+
+    const sendHeartbeat = () => {
+      const at = Date.now();
+      heartbeatsRef.current = { ...heartbeatsRef.current, [playerId.current]: at };
+      channel.track({
+        playerId: playerId.current,
+        name,
+        joinedAt: joinedAtRef.current,
+        partyLeader: createdPartyCode.current === partyCode,
+        lastSeen: at,
+      });
+      refreshPresence();
     };
 
     channel
@@ -658,12 +728,16 @@ function PartyRoom({ name, onStartGame, onCancel }) {
       .subscribe(async (subscriptionStatus) => {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('ready');
+          const lastSeen = Date.now();
+          heartbeatsRef.current = { ...heartbeatsRef.current, [playerId.current]: lastSeen };
           await channel.track({
             playerId: playerId.current,
             name,
-            joinedAt: Date.now(),
+            joinedAt: joinedAtRef.current,
             partyLeader: createdPartyCode.current === partyCode,
+            lastSeen,
           });
+          sendHeartbeat();
         }
         if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
           setStatus('error');
@@ -671,8 +745,11 @@ function PartyRoom({ name, onStartGame, onCancel }) {
         }
       });
 
+    const heartbeatTimer = setInterval(sendHeartbeat, PARTY_HEARTBEAT_INTERVAL_MS);
+
     return () => {
       active = false;
+      clearInterval(heartbeatTimer);
       if (!handedOffToGame.current) {
         channel.untrack();
         supabase.removeChannel(channel);
@@ -716,13 +793,13 @@ function PartyRoom({ name, onStartGame, onCancel }) {
 
   function startTeamBattle() {
     if (!isLeader || players.length < 2 || !channelRef.current) return;
-    const config = createTeamPartyConfig(partyCode, players, playerId.current);
+    const config = createTeamPartyConfig(partyCode, players, leaderId);
     channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
   }
 
   function startTournament() {
     if (!isLeader || players.length < 2 || !channelRef.current) return;
-    const config = createTournamentPartyConfig(partyCode, players, playerId.current);
+    const config = createTournamentPartyConfig(partyCode, players, leaderId);
     channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
   }
 
@@ -810,7 +887,6 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
   const resolvedRounds = useRef(new Set());
   const round = game.rounds[roundIndex];
   const question = game.questions[round.questionIndex];
-  const isLeader = game.leaderId === game.playerId;
   const isActive = round.playerId === game.playerId;
   const teamA = game.roster.filter((member) => member.team === 'A');
   const teamB = game.roster.filter((member) => member.team === 'B');
@@ -893,7 +969,7 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
   }, [round.id, selected, started]);
 
   useEffect(() => {
-    if (!isLeader || time > 0 || selected !== null || resolvedRounds.current.has(round.id)) return;
+    if (time > 0 || selected !== null || resolvedRounds.current.has(round.id)) return;
     game.channel.send({
       type: 'broadcast',
       event: 'party-timeout',
@@ -908,7 +984,7 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
         timedOut: true,
       },
     });
-  }, [game.channel, isLeader, round, selected, time]);
+  }, [game.channel, round, selected, time]);
 
   function choose(index) {
     if (!started || !isActive || selected !== null || resolvedRounds.current.has(round.id)) return;
@@ -974,7 +1050,6 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   const transitionTimer = useRef(null);
   const resolvedDuels = useRef(new Set());
   const answersRef = useRef({});
-  const isLeader = game.leaderId === game.playerId;
   const pair = tournament.pairs[tournament.matchIndex] || [];
   const duelId = `r${tournament.roundNumber}-m${tournament.matchIndex}`;
   const questionIndex = ((tournament.roundNumber - 1) * game.entrants.length + tournament.matchIndex) % game.questions.length;
@@ -1022,8 +1097,8 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
     }, 1200);
   }, [duelId, game.playerId, onFinish, tournament.pairs.length, tournament.winners.length]);
 
-  const resolveDuelAsLeader = useCallback((reason = 'answered') => {
-    if (!isLeader || resolvedDuels.current.has(duelId) || pair.length === 0) return;
+  const resolveDuel = useCallback((reason = 'answered') => {
+    if (resolvedDuels.current.has(duelId) || pair.length === 0) return;
     if (pair.length === 1) {
       game.channel.send({ type: 'broadcast', event: 'party-duel-result', payload: { duelId, winner: pair[0], bye: true } });
       return;
@@ -1038,7 +1113,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
       }))
       .sort((a, b) => b.answer.gain - a.answer.gain || a.answer.answeredAt - b.answer.answeredAt || a.member.joinedAt - b.member.joinedAt);
     game.channel.send({ type: 'broadcast', event: 'party-duel-result', payload: { duelId, winner: ranked[0].member, bye: false } });
-  }, [duelId, game.channel, isLeader, pair]);
+  }, [duelId, game.channel, pair]);
 
   useEffect(() => {
     const delay = Math.max(0, game.startsAt - Date.now());
@@ -1047,7 +1122,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
       if (event === 'duel-answer' && payload?.duelId === duelId) {
         answersRef.current = { ...answersRef.current, [payload.playerId]: payload };
         setDuelAnswers(answersRef.current);
-        resolveDuelAsLeader('answered');
+        resolveDuel('answered');
       }
       if (event === 'duel-result') applyDuelResult(payload);
     });
@@ -1055,7 +1130,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
       unsubscribe();
       clearTimeout(startTimer);
     };
-  }, [applyDuelResult, duelId, game, resolveDuelAsLeader]);
+  }, [applyDuelResult, duelId, game, resolveDuel]);
 
   useEffect(() => () => {
     clearTimeout(transitionTimer.current);
@@ -1096,14 +1171,14 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   }, [duelId, selected, started]);
 
   useEffect(() => {
-    if (!started || !isLeader || resolvedDuels.current.has(duelId)) return undefined;
+    if (!started || resolvedDuels.current.has(duelId)) return undefined;
     if (pair.length === 1) {
-      const byeTimer = setTimeout(() => resolveDuelAsLeader('bye'), 700);
+      const byeTimer = setTimeout(() => resolveDuel('bye'), 700);
       return () => clearTimeout(byeTimer);
     }
-    const timeout = setTimeout(() => resolveDuelAsLeader('timeout'), 15000);
+    const timeout = setTimeout(() => resolveDuel('timeout'), 15000);
     return () => clearTimeout(timeout);
-  }, [duelId, isLeader, pair.length, resolveDuelAsLeader, started]);
+  }, [duelId, pair.length, resolveDuel, started]);
 
   function choose(index) {
     if (!started || !isDuelist || hasAnswered || selected !== null || resolvedDuels.current.has(duelId)) return;
