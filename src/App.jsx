@@ -221,6 +221,18 @@ function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
 }
 
+function CloudflareBadge() {
+  return (
+    <span className="cloudflare-badge" aria-label="Protected by Cloudflare">
+      <svg className="cloudflare-logo" viewBox="0 0 64 40" aria-hidden="true" focusable="false">
+        <path fill="#f6821f" d="M45.7 17.5c-.8-7.2-7-12.8-14.5-12.8-6.1 0-11.4 3.7-13.6 9-5.2.2-9.4 4.5-9.4 9.8 0 .9.1 1.7.3 2.5h37.3c2.4 0 4.3-1.9 4.3-4.3s-2-4.2-4.4-4.2Z" />
+        <path fill="#fbad41" d="M48.8 19.7h-1.1c-.4 0-.8.3-.9.7l-.6 2.1c-.2.6.3 1.2.9 1.2h12.3c1.9 0 3.5-1.6 3.5-3.5s-1.6-3.5-3.5-3.5c-.9 0-1.7.3-2.3.9-1.4-3.6-4.9-6.2-9-6.2-1.2 0-2.3.2-3.4.6 2.2 1.8 3.8 4.5 4.1 7.7Z" />
+      </svg>
+      <span>Protected by Cloudflare</span>
+    </span>
+  );
+}
+
 function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   const [open, setOpen] = useState(false);
   return (
@@ -1419,7 +1431,7 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
 
         <section className="final-cta"><div className="cta-orbit orbit-one" /><div className="cta-orbit orbit-two" /><span className="cta-icon"><Rocket /></span><p className="eyebrow">YOUR NEXT RIVAL IS ONLINE</p><h2>Ready to put your<br />brain on the board?</h2><p>One name. Five questions. Infinite bragging rights.</p><button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" /> {accountName ? 'Play a ranked match' : 'Start battling — it’s free'}</button></section>
       </main>
-      <footer><Logo /><p>Competitive STEM for curious minds everywhere.</p><span>© 2026 Stemegle</span></footer>
+      <footer><Logo /><p>Competitive STEM for curious minds everywhere.</p><CloudflareBadge /><span>© 2026 Stemegle</span></footer>
     </div>
   );
 }
