@@ -1,10 +1,12 @@
+import { GENERATED_QUESTION_BANK } from './generatedQuestions.js';
+
 function question(category, prompt, choices, correctChoice) {
   const answer = choices.indexOf(correctChoice);
   if (answer === -1) throw new Error(`Correct choice missing for: ${prompt}`);
   return { category, q: prompt, choices, answer };
 }
 
-export const QUESTION_BANK = [
+const BASE_QUESTION_BANK = [
   // Mathematics (20)
   question('Mathematics', 'What is 12 × 8?', ['84', '96', '108', '112'], '96'),
   question('Mathematics', 'What is the square root of 144?', ['10', '11', '12', '14'], '12'),
@@ -657,6 +659,8 @@ export const QUESTION_BANK = [
   question('Engineering', 'What is the purpose of a slip ring in electrical machines?', ['Amplify rotational speed', 'Convert AC to DC', 'Maintain continuous electrical contact on a rotating shaft', 'Store magnetic energy'], 'Maintain continuous electrical contact on a rotating shaft'),
   question('Engineering', 'What is the main advantage of a MOSFET over a BJT?', ['Higher voltage rating', 'Lower cost', 'Voltage-controlled with very high input impedance', 'Simpler fabrication'], 'Voltage-controlled with very high input impedance'),
 ];
+
+export const QUESTION_BANK = [...BASE_QUESTION_BANK, ...GENERATED_QUESTION_BANK];
 
 function hashSeed(value) {
   let hash = 2166136261;
