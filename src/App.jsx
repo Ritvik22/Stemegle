@@ -30,7 +30,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePlayers, hasRealtimeConfig, recordMatchResult, supabase } from './lib/supabase';
+import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePlayers, hasRealtimeConfig, recordBotMatch, recordMatchResult, supabase } from './lib/supabase';
 import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
@@ -261,6 +261,63 @@ function createEventBus() {
   };
 }
 
+const BOT_NAMES = ['Astra', 'Quark', 'Cosmo', 'Vega', 'Turing', 'Kepler', 'Fermi'];
+const BOT_CORRECT_CHANCE = 0.68;
+
+// Builds a self-contained practice match against a simulated opponent. It uses
+// the exact same shape the live Game component expects (channel/events/opponent)
+// so the game screen needs no bot-specific rendering. The "channel" is a local
+// stub and the "opponent" drives itself through an internal timeline.
+function createBotMatch(playerName) {
+  const events = createEventBus();
+  const id = `bot-${createPlayerId()}`;
+  const questions = getQuestionsForMatch(id);
+  const startsAt = Date.now() + 2000;
+  const botName = `${BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]} (bot)`;
+  const timers = [];
+
+  // Pre-roll the bot's answers so its running score and finish are deterministic
+  // once the match starts. Timing mirrors the human's per-question scoring.
+  let runningScore = 0;
+  let offset = 0;
+  const timeline = questions.map((_, index) => {
+    const answerSeconds = 2 + Math.random() * 5; // bot "thinks" 2–7s
+    const correct = Math.random() < BOT_CORRECT_CHANCE;
+    const gain = correct ? 500 + Math.round((15 - answerSeconds) * 45) : 0;
+    runningScore += gain;
+    offset += answerSeconds * 1000 + 850; // answer time + transition
+    return { at: offset, score: runningScore, last: index === questions.length - 1 };
+  });
+
+  const channel = {
+    send() {},
+    untrack() {
+      timers.forEach(clearTimeout);
+      timers.length = 0;
+    },
+  };
+
+  // Kick off the bot's timeline aligned to the shared countdown.
+  const base = Math.max(0, startsAt - Date.now());
+  timeline.forEach((step, index) => {
+    timers.push(setTimeout(() => {
+      events.emit('score', { playerId: 'bot', score: step.score, questionIndex: index });
+      if (step.last) events.emit('finish', { playerId: 'bot', score: step.score });
+    }, base + step.at));
+  });
+
+  return {
+    id,
+    isBot: true,
+    channel,
+    events,
+    playerId: createPlayerId(),
+    opponent: { id: 'bot', name: botName },
+    startsAt,
+    questions,
+  };
+}
+
 function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
 }
@@ -445,7 +502,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
   );
 }
 
-function Matchmaking({ name, onMatched, onCancel }) {
+function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
   const [secondsWaiting, setSecondsWaiting] = useState(0);
   const [opponentOnline, setOpponentOnline] = useState(false);
   const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'configuration-error');
@@ -622,6 +679,9 @@ function Matchmaking({ name, onMatched, onCancel }) {
   const progress = opponentOnline ? 100 : Math.min(18 + secondsWaiting * 3, 76);
   const connecting = status === 'connecting';
   const hasError = status === 'error' || status === 'configuration-error';
+  // Offer a practice match against the bot once the wait is long enough, or
+  // right away if the live lobby is unreachable.
+  const offerBot = !opponentOnline && (secondsWaiting >= 10 || hasError);
 
   return (
     <main className="game-shell matchmaking-screen">
@@ -635,7 +695,14 @@ function Matchmaking({ name, onMatched, onCancel }) {
         <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? 'Rival connected' : 'Waiting for another player'}</span>
         <span><Clock3 /> Waiting {secondsWaiting}s</span>
       </div>
-      {!opponentOnline && !hasError && <p className="queue-note">Keep this tab open. We only start when two players are connected.</p>}
+      {offerBot && (
+        <div className="bot-offer">
+          <p>{hasError ? "Multiplayer is offline right now." : "We couldn't find an available player."} Play against a bot?</p>
+          <button className="button" onClick={onPlayBot}><BrainCircuit size={17} /> Play against bot</button>
+          <small>Practice match — counts toward matches played, but not ranked score.</small>
+        </div>
+      )}
+      {!opponentOnline && !hasError && <p className="queue-note">Keep this tab open, or jump into a bot match anytime.</p>}
       <button className="text-button" onClick={onCancel}>Cancel search</button>
     </main>
   );
@@ -1378,7 +1445,8 @@ function Game({ player, match, onFinish, onExit }) {
       clearTimeout(startTimer);
       clearTimeout(transitionTimer.current);
       match.channel.untrack();
-      supabase.removeChannel(match.channel);
+      // Bot matches use a local stub channel, not a Supabase channel.
+      if (!match.isBot) supabase.removeChannel(match.channel);
     };
   }, [deliverResult, match]);
 
@@ -1477,9 +1545,9 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
     <main className="game-shell results-screen">
       <Logo />
       <div className={won ? 'result-emblem win' : 'result-emblem'}>{won ? <Trophy /> : <BrainCircuit />}</div>
-      <p className="eyebrow">MATCH COMPLETE</p>
+      <p className="eyebrow">{result.vsBot ? 'PRACTICE MATCH COMPLETE' : 'MATCH COMPLETE'}</p>
       <h1>{won ? 'Brilliant win!' : 'So close. Run it back?'}</h1>
-      <p>{won ? 'Fast thinking pays off. Your rank is moving up.' : 'Every match sharpens the mind. Your next rival is waiting.'}</p>
+      <p>{result.vsBot ? 'Practice match against a bot — it counts toward matches played, but not your ranked score.' : won ? 'Fast thinking pays off. Your rank is moving up.' : 'Every match sharpens the mind. Your next rival is waiting.'}</p>
       <div className="result-card">
         <div><span className="avatar avatar-you">{player[0].toUpperCase()}</span><strong>{player}</strong><b>{result.score.toLocaleString()}</b></div>
         <span className="result-vs">{won ? 'WIN' : 'GG'}</span>
@@ -1624,16 +1692,27 @@ export default function App() {
     Boolean(new URLSearchParams(window.location.search).get('code'))
   );
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
+  const handlePlayBot = useCallback(() => {
+    const botMatch = createBotMatch(player);
+    setMatch(botMatch);
+    setOpponent(botMatch.opponent.name);
+    setScreen('game');
+  }, [player]);
   const handleFinish = useCallback(async (data) => {
     let matchStats = null;
     try {
-      matchStats = await recordMatchResult(match?.id, data.score, data.opponentScore);
+      if (match?.isBot) {
+        // Counts toward the global matches total, but not ranked score.
+        await recordBotMatch(match.id);
+      } else {
+        matchStats = await recordMatchResult(match?.id, data.score, data.opponentScore);
+      }
     } catch (error) {
       console.error('Could not persist match result', error);
     }
-    setResult({ ...data, matchStats });
+    setResult({ ...data, matchStats, vsBot: Boolean(match?.isBot) });
     setScreen('results');
-  }, [match?.id]);
+  }, [match?.id, match?.isBot]);
 
   useEffect(() => {
     if (screen === 'game' || screen === 'party-game') return undefined;
@@ -1724,7 +1803,7 @@ export default function App() {
   const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game';
 
   let content;
-  if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
+  if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={home} />;
   else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;
   else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
   else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;

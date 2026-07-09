@@ -65,6 +65,14 @@ export async function fetchLeaderboard(accountId) {
   return { leaders: leaders.map(normalizeRank), accountRank: normalizeRank(accountRank) };
 }
 
+// Records a bot/practice match toward the global matches-completed counter
+// without touching ranked stats. Safe to call for guests and signed-in users.
+export async function recordBotMatch(matchId) {
+  if (!supabase || !matchId) return;
+  const { error } = await supabase.rpc('record_bot_match', { p_match_id: matchId });
+  if (error) throw error;
+}
+
 export async function recordMatchResult(matchId, score, opponentScore) {
   if (!supabase || !matchId) return null;
   const { data, error } = await supabase.rpc('record_match_result', {

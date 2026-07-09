@@ -169,3 +169,8 @@ footer { border-top: 1px solid var(--line); min-height: 100px; max-width: 1180px
 .confirm-actions{display:flex;gap:12px;justify-content:center;margin-top:26px}
 .confirm-actions .button{flex:1}
 @media (max-width: 680px){.confirm-actions{flex-direction:column}}
+
+.bot-offer{margin:22px 0 4px;padding:20px 22px;background:#172c23;border:1px solid #2d473c;border-radius:16px;max-width:min(440px,90vw);display:flex;flex-direction:column;align-items:center;gap:12px}
+.bot-offer p{margin:0;color:#d7e5de;font-weight:700;font-size:14px;text-align:center}
+.bot-offer .button{background:var(--green);color:var(--ink)}
+.bot-offer small{color:#8da097;font-size:11px;text-align:center;line-height:1.4}
