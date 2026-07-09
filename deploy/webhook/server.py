@@ -8,7 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "").encode()
-DEPLOY_REPO = os.environ.get("DEPLOY_REPO", "ritvik22/stemegle")
+DEPLOY_REPO = os.environ.get("DEPLOY_REPO", "ritvik22/stemegle").lower()
 DEPLOY_BRANCH = os.environ.get("DEPLOY_BRANCH", "main")
 DEPLOY_COMMAND = ["/usr/local/bin/stemegle-deploy"]
 LOG_PATH = os.environ.get("DEPLOY_LOG", "/repo/deploy.log")
@@ -91,9 +91,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"pong\n")
             return
 
-        full_name = payload.get("repository", {}).get("full_name")
+        full_name = (payload.get("repository", {}).get("full_name") or "").lower()
         ref = payload.get("ref")
         if event != "push" or full_name != DEPLOY_REPO or ref != f"refs/heads/{DEPLOY_BRANCH}":
+            log(f"ignored event={event} repo={full_name or '-'} ref={ref or '-'}")
             self.send_response(202)
             self.end_headers()
             self.wfile.write(b"ignored\n")
