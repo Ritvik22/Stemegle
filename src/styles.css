@@ -162,3 +162,10 @@ footer { border-top: 1px solid var(--line); min-height: 100px; max-width: 1180px
 .party-pill-leave{border:0;border-left:1.5px solid #33493f;background:none;color:#9fb2a9;padding:0 12px;cursor:pointer;display:grid;place-items:center;transition:background .18s,color .18s}
 .party-pill-leave:hover{background:#3a1f1f;color:#ff9b86}
 @media (max-width: 680px){.party-pill{right:14px;left:auto;top:14px}}
+
+.confirm-modal{text-align:center}
+.confirm-modal .modal-icon{margin:0 auto 14px}
+.confirm-modal>p{color:var(--muted);line-height:1.55;margin:0 auto}
+.confirm-actions{display:flex;gap:12px;justify-content:center;margin-top:26px}
+.confirm-actions .button{flex:1}
+@media (max-width: 680px){.confirm-actions{flex-direction:column}}

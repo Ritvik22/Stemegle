@@ -875,7 +875,7 @@ function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onL
                 <span><GitBranch /></span>
                 <h3>Tournament</h3>
                 <p>Runs live 1v1 bracket duels. Winners advance until one party champion remains.</p>
-                <button className="button button-secondary" onClick={startTournament} disabled={!isLeader || players.length < 2}>Start tournament</button>
+                <button className="button" onClick={startTournament} disabled={!isLeader || players.length < 2}>Start tournament</button>
               </article>
             </div>
             {status === 'connecting' && <p className="queue-note">Connecting to party…</p>}
@@ -901,6 +901,23 @@ function PartyPill({ code, count, onReturn, onLeave }) {
         <ArrowRight size={16} />
       </button>
       <button className="party-pill-leave" onClick={onLeave} aria-label="Leave party" title="Leave party"><X size={15} /></button>
+    </div>
+  );
+}
+
+function ConfirmDialog({ title, message, confirmLabel, cancelLabel = 'Cancel', onConfirm, onCancel }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
+      <div className="entry-modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <button className="modal-close" onClick={onCancel} aria-label="Close"><X size={20} /></button>
+        <span className="modal-icon"><Users /></span>
+        <h2 id="confirm-title">{title}</h2>
+        <p>{message}</p>
+        <div className="confirm-actions">
+          <button className="button button-secondary" onClick={onCancel}>{cancelLabel}</button>
+          <button className="button party-leave-button" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1497,9 +1514,19 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
             <h1>Think fast.<br />Win <em>faster.</em></h1>
             <p className="hero-sub">Go head-to-head in rapid-fire STEM battles. Outsmart real opponents, climb the universal ranks, and prove your brain has game.</p>
             <div className="hero-actions">
-              <button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" size={18} /> {accountName ? 'Play with my account' : 'Play as guest'}</button>
-              <button className="button button-secondary button-large" onClick={onParty}><Users size={18} /> Play with friends</button>
-              {accountName ? <span className="signed-in-copy"><Check /> Signed in as <b>{accountName}</b></span> : <button className="button button-secondary button-large" onClick={onCreate}>Create account <ArrowRight size={18} /></button>}
+              {accountName ? (
+                <>
+                  <button className="button button-large" onClick={onAccountPlay}><Play fill="currentColor" size={18} /> Play with my account</button>
+                  <button className="button button-secondary button-large" onClick={onParty}><Users size={18} /> Play with friends</button>
+                  <span className="signed-in-copy"><Check /> Signed in as <b>{accountName}</b></span>
+                </>
+              ) : (
+                <>
+                  <button className="button button-large" onClick={onCreate}>Create account <ArrowRight size={18} /></button>
+                  <button className="button button-secondary button-large" onClick={onParty}><Users size={18} /> Play with friends</button>
+                  <button className="button button-secondary button-large" onClick={onGuest}><Play size={18} /> Play as guest</button>
+                </>
+              )}
             </div>
             <p className="fine-print"><Check size={14} /> Free to play <Check size={14} /> No download <Check size={14} /> Match in seconds</p>
           </div>
@@ -1562,9 +1589,14 @@ export default function App() {
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
   const [guestDestination, setGuestDestination] = useState('matchmaking');
-  const [partyCode, setPartyCode] = useState(getPartyCodeFromUrl());
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  // `partyCode` is the party you have actually joined/created. A code sitting
+  // in the invite URL is only a *pending* invite until you accept it, so
+  // browsing elsewhere never silently connects you to it.
+  const [partyCode, setPartyCode] = useState('');
   const { onlineCount, gamesPlayed, registeredUsers, leaders, accountRank } = useLiveStats(session?.user?.id);
   const partyLinkHandled = useRef(false);
+  const pendingInvite = useRef(getPartyCodeFromUrl());
   const partyPlayerId = useRef(createPlayerId());
   const createdPartyCodeRef = useRef('');
   const screenRef = useRef(screen);
@@ -1639,9 +1671,12 @@ export default function App() {
     || '';
 
   useEffect(() => {
-    if (partyLinkHandled.current || !getPartyCodeFromUrl() || !authReady) return;
+    const invite = pendingInvite.current;
+    if (partyLinkHandled.current || invite.length !== PARTY_CODE_LENGTH || !authReady) return;
     partyLinkHandled.current = true;
     if (accountName) {
+      pendingInvite.current = '';
+      joinParty(invite);
       start(accountName, 'party');
       return;
     }
@@ -1665,6 +1700,7 @@ export default function App() {
   function leaveParty() {
     createdPartyCodeRef.current = '';
     setPartyCode('');
+    setConfirmLeave(false);
     window.history.replaceState(null, '', window.location.pathname);
   }
   function playAccount() { if (accountName) start(accountName); else setModal('login'); }
@@ -1689,17 +1725,23 @@ export default function App() {
 
   let content;
   if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
-  else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={leaveParty} onCancel={home} />;
+  else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;
   else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
   else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen('party') : undefined} />;
   else content = <>
     <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
-    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party' && !player) leaveParty(); }} onGuestStart={(name) => start(name, guestDestination)} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
+    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
+      const invite = guestDestination === 'party' ? pendingInvite.current : '';
+      pendingInvite.current = '';
+      if (invite.length === PARTY_CODE_LENGTH) joinParty(invite);
+      start(name, guestDestination);
+    }} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
   </>;
 
   return <>
     {content}
-    {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={leaveParty} />}
+    {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={() => setConfirmLeave(true)} />}
+    {confirmLeave && <ConfirmDialog title="Leave the party?" message="Are you sure you want to leave the party? You'll need the invite link or code to rejoin." confirmLabel="Leave party" onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}
   </>;
 }
