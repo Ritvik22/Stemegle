@@ -882,8 +882,8 @@ function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onL
             {!isLeader && <p className="queue-note">Only the party leader can choose and start the game type.</p>}
             {isLeader && players.length < 2 && <p className="queue-note">Invite at least one friend to unlock party games.</p>}
             <div className="party-footer-actions">
-              <button className="text-button" onClick={onLeaveParty}>Leave party</button>
-              <button className="text-button" onClick={onCreateParty} disabled={!hasRealtimeConfig}>Start a new party (new code)</button>
+              <button className="button button-secondary party-new-button" onClick={onCreateParty} disabled={!hasRealtimeConfig}><Shuffle size={16} /> Start a new party</button>
+              <button className="button party-leave-button" onClick={onLeaveParty}><X size={16} /> Leave party</button>
             </div>
           </>
         )}
