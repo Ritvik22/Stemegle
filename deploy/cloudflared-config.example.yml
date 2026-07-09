@@ -1,0 +1,11 @@
+tunnel: YOUR_TUNNEL_ID_OR_NAME
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_ID.json
+
+ingress:
+  - hostname: stemegle.com
+    service: http://app:80
+  - hostname: www.stemegle.com
+    service: http://app:80
+  - hostname: deploy.stemegle.com
+    service: http://autodeploy:9000
+  - service: http_status:404

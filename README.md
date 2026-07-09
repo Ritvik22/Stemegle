@@ -15,8 +15,9 @@ npm install
 Create `.env.local` with the public Supabase Realtime credentials before starting:
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=your-project-url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+VITE_SUPABASE_URL=your-project-url
+VITE_SUPABASE_ANON_KEY=your-anon-key
+VITE_SITE_URL=http://localhost:5173
 ```
 
 Then run:
@@ -32,6 +33,10 @@ Then open the local URL printed by Vite.
 ```bash
 npm run build
 ```
+
+## Debian + Cloudflare Tunnel hosting
+
+This app can be self-hosted as static files behind Nginx and Cloudflare Tunnel. See [DEPLOYMENT.md](./DEPLOYMENT.md) for the server setup, Supabase redirect settings, Nginx config, Cloudflare Tunnel config, and rsync-based deployment script.
 
 ## Multiplayer architecture
 

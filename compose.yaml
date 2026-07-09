@@ -1,0 +1,57 @@
+name: stemegle
+
+services:
+  app:
+    build:
+      context: ${APP_SOURCE_DIR:-.}
+      dockerfile: ${APP_DOCKERFILE:-Dockerfile}
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+        VITE_SITE_URL: ${VITE_SITE_URL}
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-${VITE_SUPABASE_URL}}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-${VITE_SUPABASE_ANON_KEY}}
+    image: stemegle:latest
+    container_name: stemegle_app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${STEMEGLE_PORT:-8097}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.3.0
+    container_name: stemegle_tunnel
+    depends_on:
+      app:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    restart: unless-stopped
+    profiles:
+      - tunnel
+
+  autodeploy:
+    build:
+      context: .
+      dockerfile: deploy/webhook/Dockerfile
+    image: stemegle-autodeploy:latest
+    container_name: stemegle_autodeploy
+    restart: unless-stopped
+    environment:
+      DEPLOY_BRANCH: ${DEPLOY_BRANCH:-main}
+      DEPLOY_DIR: /repo
+      DEPLOY_REPO: ${DEPLOY_REPO:-ritvik22/stemegle}
+      DEPLOY_SOURCE_DIR: /repo/source
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      STEMEGLE_PORT: ${STEMEGLE_PORT:-8097}
+    volumes:
+      - ./:/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+    profiles:
+      - autodeploy
