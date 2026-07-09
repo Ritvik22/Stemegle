@@ -7,6 +7,7 @@ if (!connectionString) throw new Error('POSTGRES_URL_NON_POOLING or POSTGRES_URL
 const migrationPaths = [
   '../supabase/migrations/202607070001_real_leaderboard.sql',
   '../supabase/migrations/202607080001_ranked_leaderboard.sql',
+  '../supabase/migrations/202607090001_bot_match.sql',
 ];
 const sql = postgres(connectionString, { max: 1, prepare: false });
 
