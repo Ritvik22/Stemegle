@@ -198,10 +198,15 @@ function createTeamPartyConfig(partyCode, players, leaderId) {
   const roster = splitPartyTeams(players);
   const turnsPerPlayer = roster.length <= 4 ? 2 : 1;
   const rounds = [];
+  // The timestamp seeds fresh questions per rematch and namespaces round ids:
+  // the party channel outlives games, so late broadcasts from a previous game
+  // must never match this game's rounds. Every client plays from this
+  // leader-generated config verbatim.
+  const stamp = Date.now();
   for (let turn = 0; turn < turnsPerPlayer; turn += 1) {
     roster.forEach((player) => {
       rounds.push({
-        id: `${turn}-${player.playerId}`,
+        id: `${stamp}-${turn}-${player.playerId}`,
         playerId: player.playerId,
         playerName: player.name,
         team: player.team,
@@ -210,27 +215,28 @@ function createTeamPartyConfig(partyCode, players, leaderId) {
     });
   }
   return {
-    id: `${partyCode}-team-${Date.now()}`,
+    id: `${partyCode}-team-${stamp}`,
     type: 'team',
     partyCode,
     leaderId,
     roster,
     rounds,
-    questions: getPartyQuestions(`${partyCode}:team`, rounds.length),
-    startsAt: Date.now() + 1800,
+    questions: getPartyQuestions(`${partyCode}:team:${stamp}`, rounds.length),
+    startsAt: stamp + 1800,
   };
 }
 
 function createTournamentPartyConfig(partyCode, players, leaderId) {
   const entrants = [...players].sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
+  const stamp = Date.now();
   return {
-    id: `${partyCode}-tournament-${Date.now()}`,
+    id: `${partyCode}-tournament-${stamp}`,
     type: 'tournament',
     partyCode,
     leaderId,
     entrants,
-    questions: getPartyQuestions(`${partyCode}:tournament`, Math.max(entrants.length * 2, 6)),
-    startsAt: Date.now() + 1800,
+    questions: getPartyQuestions(`${partyCode}:tournament:${stamp}`, Math.max(entrants.length * 2, 6)),
+    startsAt: stamp + 1800,
   };
 }
 
@@ -635,58 +641,55 @@ function Matchmaking({ name, onMatched, onCancel }) {
   );
 }
 
-function PartyRoom({ name, onStartGame, onCancel }) {
-  const [partyCode, setPartyCode] = useState(getPartyCodeFromUrl());
-  const [joinCode, setJoinCode] = useState(getPartyCodeFromUrl());
+function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGameStart }) {
   const [players, setPlayers] = useState([]);
   const [leaderId, setLeaderId] = useState('');
   const [status, setStatus] = useState(hasRealtimeConfig ? 'idle' : 'configuration-error');
   const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
-  const playerId = useRef(createPlayerId());
   const channelRef = useRef(null);
   const eventsRef = useRef(createEventBus());
   const heartbeatsRef = useRef({});
   const joinedAtRef = useRef(Date.now());
-  const handedOffToGame = useRef(false);
-  const createdPartyCode = useRef('');
   const nameRef = useRef(name);
-  const onStartGameRef = useRef(onStartGame);
+  const onGameStartRef = useRef(onGameStart);
 
   useEffect(() => {
     nameRef.current = name;
-    onStartGameRef.current = onStartGame;
+    onGameStartRef.current = onGameStart;
   });
 
-  const isLeader = leaderId === playerId.current;
-  const teamPreview = players.length >= 2 ? splitPartyTeams(players) : [];
-  const teamACount = teamPreview.filter((player) => player.team === 'A').length;
-  const teamBCount = teamPreview.filter((player) => player.team === 'B').length;
-  const inviteLink = partyCode ? `${window.location.origin}${window.location.pathname}?party=${partyCode}` : '';
-
   useEffect(() => {
-    if (!partyCode || !hasRealtimeConfig) return undefined;
+    if (!hasRealtimeConfig) return undefined;
+    if (!code) {
+      setPlayers([]);
+      setLeaderId('');
+      setStatus('idle');
+      setError('');
+      return undefined;
+    }
 
     let active = true;
     setStatus('connecting');
     setError('');
     heartbeatsRef.current = {};
     joinedAtRef.current = Date.now();
-    const channel = supabase.channel(`${PARTY_PREFIX}${partyCode}`, {
+    const channel = supabase.channel(`${PARTY_PREFIX}${code}`, {
       config: {
-        presence: { key: playerId.current },
+        presence: { key: playerIdRef.current },
         broadcast: { self: true, ack: true },
       },
     });
     channelRef.current = channel;
 
     const selfPresence = (at) => ({
-      playerId: playerId.current,
+      playerId: playerIdRef.current,
       name: nameRef.current,
       joinedAt: joinedAtRef.current,
-      partyLeader: createdPartyCode.current === partyCode,
+      partyLeader: createdPartyCodeRef.current === code,
       lastSeen: at,
     });
+    setPlayers([selfPresence(Date.now())]);
+    setLeaderId(createdPartyCodeRef.current === code ? playerIdRef.current : '');
 
     const refreshPresence = () => {
       const roster = getPartyRoster(channel);
@@ -701,13 +704,13 @@ function PartyRoom({ name, onStartGame, onCancel }) {
         }
       });
       const liveRoster = roster.filter((partyPlayer) => {
-        if (partyPlayer.playerId === playerId.current) return true;
+        if (partyPlayer.playerId === playerIdRef.current) return true;
         const entry = observed[partyPlayer.playerId];
         return now - (entry?.at ?? now) <= PARTY_PRESENCE_STALE_MS;
       });
       // Presence sync can lag our own track(); keep ourselves in the roster so
       // the party never renders empty or leaderless for the local player.
-      if (!liveRoster.some((partyPlayer) => partyPlayer.playerId === playerId.current)) {
+      if (!liveRoster.some((partyPlayer) => partyPlayer.playerId === playerIdRef.current)) {
         liveRoster.push(selfPresence(now));
         liveRoster.sort(comparePartyPlayers);
       }
@@ -728,12 +731,11 @@ function PartyRoom({ name, onStartGame, onCancel }) {
       .on('presence', { event: 'sync' }, refreshPresence)
       .on('broadcast', { event: 'party-start' }, ({ payload }) => {
         if (!active || !payload?.config) return;
-        handedOffToGame.current = true;
-        onStartGameRef.current({
+        onGameStartRef.current?.({
           ...payload.config,
           channel,
           events: eventsRef.current,
-          playerId: playerId.current,
+          playerId: playerIdRef.current,
         });
       })
       .on('broadcast', { event: 'party-answer' }, ({ payload }) => eventsRef.current.emit('answer', payload))
@@ -758,39 +760,46 @@ function PartyRoom({ name, onStartGame, onCancel }) {
       active = false;
       clearInterval(heartbeatTimer);
       document.removeEventListener('visibilitychange', handleVisibility);
-      if (!handedOffToGame.current) {
-        channel.untrack();
-        supabase.removeChannel(channel);
-        if (channelRef.current === channel) channelRef.current = null;
-      }
+      channel.untrack();
+      supabase.removeChannel(channel);
+      if (channelRef.current === channel) channelRef.current = null;
     };
-  // The channel must live for as long as the party code is active. `name` and
-  // `onStartGame` are read through refs so parent re-renders (live stats, etc.)
+  // The channel lives at the app level for as long as the party code does, so
+  // finishing a game or navigating between screens never disconnects the
+  // party. `name` and `onGameStart` are read through refs so parent re-renders
   // never tear down the subscription — that teardown is what kicked players.
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code]);
+
+  return { players, leaderId, status, error, channelRef, events: eventsRef.current };
+}
+
+function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onLeaveParty, onCancel }) {
+  const [joinCode, setJoinCode] = useState(partyCode);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const { players, leaderId, status } = party;
+
+  useEffect(() => {
+    setJoinCode(partyCode);
+    setError('');
   }, [partyCode]);
 
-  function createParty() {
-    if (!hasRealtimeConfig) return;
-    const code = createPartyCode();
-    createdPartyCode.current = code;
-    setPartyCode(code);
-    setJoinCode(code);
-    setLeaderId(playerId.current);
-    window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
-  }
+  const isLeader = leaderId === playerId;
+  const teamPreview = players.length >= 2 ? splitPartyTeams(players) : [];
+  const teamACount = teamPreview.filter((player) => player.team === 'A').length;
+  const teamBCount = teamPreview.filter((player) => player.team === 'B').length;
+  const inviteLink = partyCode ? `${window.location.origin}${window.location.pathname}?party=${partyCode}` : '';
 
-  function joinParty(event) {
+  function submitJoin(event) {
     event.preventDefault();
     const code = normalizePartyCode(joinCode);
     if (code.length !== PARTY_CODE_LENGTH) {
       setError('Enter a valid 5-character party code.');
       return;
     }
-    createdPartyCode.current = '';
-    setPartyCode(code);
-    setJoinCode(code);
-    window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
+    setError('');
+    onJoinParty(code);
   }
 
   async function copyInvite() {
@@ -801,35 +810,36 @@ function PartyRoom({ name, onStartGame, onCancel }) {
   }
 
   function startTeamBattle() {
-    if (!isLeader || players.length < 2 || !channelRef.current) return;
+    if (!isLeader || players.length < 2 || !party.channelRef.current) return;
     const config = createTeamPartyConfig(partyCode, players, leaderId);
-    channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
+    party.channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
   }
 
   function startTournament() {
-    if (!isLeader || players.length < 2 || !channelRef.current) return;
+    if (!isLeader || players.length < 2 || !party.channelRef.current) return;
     const config = createTournamentPartyConfig(partyCode, players, leaderId);
-    channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
+    party.channelRef.current.send({ type: 'broadcast', event: 'party-start', payload: { config } });
   }
 
   const hasError = status === 'error' || status === 'configuration-error';
+  const displayError = error || party.error;
 
   return (
     <main className="game-shell party-screen">
       <Logo />
-      <button className="icon-button" aria-label="Exit party" onClick={onCancel}><X /></button>
+      <button className="icon-button" aria-label="Back home (you stay in the party)" onClick={onCancel}><X /></button>
       <section className="party-card">
         <span className="modal-icon"><Users /></span>
         <p className="eyebrow">{partyCode ? 'FRIEND PARTY' : 'PLAY WITH FRIENDS'}</p>
         <h1>{partyCode ? `Party ${partyCode}` : 'Create or join a party'}</h1>
-        <p>{partyCode ? 'Share the code, wait for friends to appear, then the party leader chooses the game type.' : 'Create a private party code or paste a friend’s code to join their room.'}</p>
+        <p>{partyCode ? 'Share the code, wait for friends to appear, then the party leader chooses the game type. The party stays together between games.' : 'Create a private party code or paste a friend’s code to join their room.'}</p>
 
-        {hasError && <p className="auth-message error" role="alert">{error || 'Supabase realtime is not configured for parties on this deployment.'}</p>}
+        {(hasError || error) && <p className="auth-message error" role="alert">{displayError || 'Supabase realtime is not configured for parties on this deployment.'}</p>}
 
         {!partyCode && (
           <div className="party-entry-grid">
-            <button className="button button-large" onClick={createParty} disabled={!hasRealtimeConfig}><Users /> Create party</button>
-            <form onSubmit={joinParty} className="party-join-form">
+            <button className="button button-large" onClick={onCreateParty} disabled={!hasRealtimeConfig}><Users /> Create party</button>
+            <form onSubmit={submitJoin} className="party-join-form">
               <label>Party code<input value={joinCode} onChange={(event) => setJoinCode(normalizePartyCode(event.target.value))} placeholder="ABCDE" maxLength={PARTY_CODE_LENGTH} /></label>
               <button className="button button-secondary" type="submit" disabled={!hasRealtimeConfig}>Join party <ArrowRight /></button>
             </form>
@@ -844,7 +854,7 @@ function PartyRoom({ name, onStartGame, onCancel }) {
             </div>
 
             <div className="party-roster">
-              <div className="party-roster-head"><span>{players.length} in party</span><small>{isLeader ? 'You are the leader' : 'Waiting for party leader'}</small></div>
+              <div className="party-roster-head"><span>{players.length} in party</span><small>{isLeader ? 'You are the leader' : leaderId ? `${players.find((member) => member.playerId === leaderId)?.name ?? 'A friend'} is the leader` : 'Waiting for party leader'}</small></div>
               {players.map((player) => (
                 <div className="party-player" key={player.playerId}>
                   <span className="leader-avatar">{player.name[0].toUpperCase()}</span>
@@ -868,12 +878,27 @@ function PartyRoom({ name, onStartGame, onCancel }) {
                 <button className="button button-secondary" onClick={startTournament} disabled={!isLeader || players.length < 2}>Start tournament</button>
               </article>
             </div>
+            {status === 'connecting' && <p className="queue-note">Connecting to party…</p>}
             {!isLeader && <p className="queue-note">Only the party leader can choose and start the game type.</p>}
             {isLeader && players.length < 2 && <p className="queue-note">Invite at least one friend to unlock party games.</p>}
+            <div className="party-footer-actions">
+              <button className="text-button" onClick={onLeaveParty}>Leave party</button>
+              <button className="text-button" onClick={onCreateParty} disabled={!hasRealtimeConfig}>Start a new party (new code)</button>
+            </div>
           </>
         )}
       </section>
     </main>
+  );
+}
+
+function PartyPill({ code, count, onReturn }) {
+  return (
+    <button className="party-pill" onClick={onReturn} aria-label={`You are in party ${code} with ${count} ${count === 1 ? 'player' : 'players'}. Return to the party.`}>
+      <span className="party-pill-icon"><Users size={17} /></span>
+      <span className="party-pill-text"><small><i /> IN PARTY · {count} {count === 1 ? 'PLAYER' : 'PLAYERS'}</small><strong>Party {code}</strong></span>
+      <ArrowRight size={16} />
+    </button>
   );
 }
 
@@ -946,11 +971,9 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
     };
   }, [game, resolveRound]);
 
-  useEffect(() => () => {
-    clearTimeout(transitionTimer.current);
-    game.channel.untrack();
-    supabase.removeChannel(game.channel);
-  }, [game.channel]);
+  // The party connection owns the channel; the game only borrows it, so the
+  // party survives after the game ends.
+  useEffect(() => () => clearTimeout(transitionTimer.current), []);
 
   useEffect(() => {
     const renderGameState = () => JSON.stringify({
@@ -1060,7 +1083,9 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   const resolvedDuels = useRef(new Set());
   const answersRef = useRef({});
   const pair = tournament.pairs[tournament.matchIndex] || [];
-  const duelId = `r${tournament.roundNumber}-m${tournament.matchIndex}`;
+  // Namespaced by game id: the party channel outlives games, so a late duel
+  // broadcast from a previous game must never match this game's duels.
+  const duelId = `${game.id}-r${tournament.roundNumber}-m${tournament.matchIndex}`;
   const questionIndex = ((tournament.roundNumber - 1) * game.entrants.length + tournament.matchIndex) % game.questions.length;
   const question = game.questions[questionIndex];
   const isDuelist = pair.some((member) => member.playerId === game.playerId);
@@ -1141,11 +1166,9 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
     };
   }, [applyDuelResult, duelId, game, resolveDuel]);
 
-  useEffect(() => () => {
-    clearTimeout(transitionTimer.current);
-    game.channel.untrack();
-    supabase.removeChannel(game.channel);
-  }, [game.channel]);
+  // The party connection owns the channel; the game only borrows it, so the
+  // party survives after the game ends.
+  useEffect(() => () => clearTimeout(transitionTimer.current), []);
 
   useEffect(() => {
     answersRef.current = {};
@@ -1395,7 +1418,7 @@ function Game({ player, match, onFinish, onExit }) {
   );
 }
 
-function Results({ player, opponent, result, onRematch, onHome }) {
+function Results({ player, opponent, result, onRematch, onHome, onBackToParty }) {
   if (result.type === 'party-team' || result.type === 'party-tournament') {
     const isTournament = result.type === 'party-tournament';
     return (
@@ -1419,7 +1442,12 @@ function Results({ player, opponent, result, onRematch, onHome }) {
             <div><span className="avatar avatar-nova">{player[0].toUpperCase()}</span><strong>You</strong><b>{result.champion === player ? 'Winner' : 'GG'}</b></div>
           </div>
         )}
-        <div className="result-actions"><button className="button" onClick={onHome}><Users size={17} /> Back to home</button><button className="button button-secondary" onClick={onHome}>Done</button></div>
+        <div className="result-actions">
+          {onBackToParty
+            ? <><button className="button" onClick={onBackToParty}><Users size={17} /> Back to party</button><button className="button button-secondary" onClick={onHome}>Back home</button></>
+            : <><button className="button" onClick={onHome}><Users size={17} /> Back to home</button><button className="button button-secondary" onClick={onHome}>Done</button></>}
+        </div>
+        {onBackToParty && <p className="queue-note">You are still in the party — the leader can start the next game any time.</p>}
       </main>
     );
   }
@@ -1531,8 +1559,31 @@ export default function App() {
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
   const [guestDestination, setGuestDestination] = useState('matchmaking');
+  const [partyCode, setPartyCode] = useState(getPartyCodeFromUrl());
   const { onlineCount, gamesPlayed, registeredUsers, leaders, accountRank } = useLiveStats(session?.user?.id);
   const partyLinkHandled = useRef(false);
+  const partyPlayerId = useRef(createPlayerId());
+  const createdPartyCodeRef = useRef('');
+  const screenRef = useRef(screen);
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
+
+  // The party connection lives here, not in the party screen, so finishing a
+  // game or browsing other screens never disconnects anyone from the party.
+  const party = usePartyConnection({
+    code: player ? partyCode : '',
+    name: player,
+    playerIdRef: partyPlayerId,
+    createdPartyCodeRef,
+    onGameStart: (config) => {
+      // Don't yank members out of an active ranked match or queue.
+      if (screenRef.current === 'game' || screenRef.current === 'matchmaking') return;
+      setResult(null);
+      setMatch(config);
+      setScreen('party-game');
+    },
+  });
   const fromConfirmLink = useRef(
     window.location.hash.includes('access_token') ||
     Boolean(new URLSearchParams(window.location.search).get('code'))
@@ -1596,6 +1647,23 @@ export default function App() {
   }, [accountName, authReady]);
 
   function start(name, destination = 'matchmaking') { setPlayer(name); setModal(null); setScreen(destination); }
+  function createParty() {
+    if (!hasRealtimeConfig) return;
+    const code = createPartyCode();
+    createdPartyCodeRef.current = code;
+    setPartyCode(code);
+    window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
+  }
+  function joinParty(code) {
+    createdPartyCodeRef.current = '';
+    setPartyCode(code);
+    window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
+  }
+  function leaveParty() {
+    createdPartyCodeRef.current = '';
+    setPartyCode('');
+    window.history.replaceState(null, '', window.location.pathname);
+  }
   function playAccount() { if (accountName) start(accountName); else setModal('login'); }
   function playParty() {
     if (accountName) {
@@ -1613,13 +1681,22 @@ export default function App() {
   function home() { setScreen('landing'); setResult(null); setMatch(null); setOpponent(''); }
   async function logout() { await supabase?.auth.signOut(); home(); }
 
-  if (screen === 'matchmaking') return <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
-  if (screen === 'party') return <PartyRoom name={player} onStartGame={(partyGame) => { setMatch(partyGame); setScreen('party-game'); }} onCancel={home} />;
-  if (screen === 'party-game' && match) return <PartyGame player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={home} />;
-  if (screen === 'game' && match) return <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
-  if (screen === 'results') return <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} />;
-  return <>
+  const inParty = Boolean(partyCode && player);
+  const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game';
+
+  let content;
+  if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onCancel={home} />;
+  else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={leaveParty} onCancel={home} />;
+  else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
+  else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
+  else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen('party') : undefined} />;
+  else content = <>
     <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
-    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => setModal(null)} onGuestStart={(name) => start(name, guestDestination)} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
+    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party' && !player) leaveParty(); }} onGuestStart={(name) => start(name, guestDestination)} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
+  </>;
+
+  return <>
+    {content}
+    {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} />}
   </>;
 }
