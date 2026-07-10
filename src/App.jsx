@@ -19,6 +19,7 @@ import {
   GitBranch,
   Medal,
   Menu,
+  MessageCircle,
   Orbit,
   Play,
   Rocket,
@@ -322,6 +323,74 @@ function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
 }
 
+const CHAT_MAX_LENGTH = 240;
+const CHAT_HISTORY_CAP = 100;
+
+// Appends a chat message, deduping by id — messages are appended optimistically
+// on send AND echoed back by the channel (broadcast self: true), so the id
+// check keeps exactly one copy.
+function appendChatMessage(current, msg) {
+  if (!msg?.id || typeof msg.text !== 'string' || !msg.text.trim()) return current;
+  if (current.some((existing) => existing.id === msg.id)) return current;
+  return [...current.slice(-(CHAT_HISTORY_CAP - 1)), { ...msg, text: msg.text.slice(0, CHAT_MAX_LENGTH) }];
+}
+
+function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const [unread, setUnread] = useState(0);
+  const listRef = useRef(null);
+  const seenCount = useRef(messages.length);
+
+  useEffect(() => {
+    if (open) {
+      setUnread(0);
+      if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    } else if (messages.length > seenCount.current) {
+      setUnread((count) => count + (messages.length - seenCount.current));
+    }
+    seenCount.current = messages.length;
+  }, [messages, open]);
+
+  function submit(event) {
+    event.preventDefault();
+    const trimmed = text.trim().slice(0, CHAT_MAX_LENGTH);
+    if (!trimmed) return;
+    onSend(trimmed);
+    setText('');
+  }
+
+  if (!open) {
+    return (
+      <button className="chat-fab" onClick={() => setOpen(true)} aria-label={`Open ${title} chat`}>
+        <MessageCircle size={17} /> Chat{unread > 0 && <i className="chat-unread">{unread > 9 ? '9+' : unread}</i>}
+      </button>
+    );
+  }
+
+  return (
+    <div className="chat-dock" role="log" aria-label={`${title} chat`}>
+      <div className="chat-head">
+        <strong><MessageCircle size={14} /> {title}</strong>
+        <button onClick={() => setOpen(false)} aria-label="Minimize chat"><X size={15} /></button>
+      </div>
+      <div className="chat-list" ref={listRef}>
+        {messages.length === 0 && <p className="chat-empty">Say hi — only {scopeLabel} can see these messages.</p>}
+        {messages.map((msg) => (
+          <div key={msg.id} className={msg.playerId === selfId ? 'chat-msg own' : 'chat-msg'}>
+            <small>{msg.playerId === selfId ? 'You' : msg.name}</small>
+            <span>{msg.text}</span>
+          </div>
+        ))}
+      </div>
+      <form className="chat-input" onSubmit={submit}>
+        <input value={text} onChange={(event) => setText(event.target.value)} placeholder="Type a message…" maxLength={CHAT_MAX_LENGTH} aria-label="Chat message" />
+        <button type="submit" disabled={!text.trim()} aria-label="Send message"><ArrowRight size={16} /></button>
+      </form>
+    </div>
+  );
+}
+
 function CloudflareBadge() {
   return (
     <span className="cloudflare-badge" aria-label="Protected by Cloudflare">
@@ -584,6 +653,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         .on('broadcast', { event: 'start' }, ({ payload }) => finalize(payload))
         .on('broadcast', { event: 'score' }, ({ payload }) => events.emit('score', payload))
         .on('broadcast', { event: 'finish' }, ({ payload }) => events.emit('finish', payload))
+        .on('broadcast', { event: 'chat' }, ({ payload }) => events.emit('chat', payload))
         .on('presence', { event: 'sync' }, () => {
           const matchPlayers = getPresencePlayers(channel);
           events.emit('presence', matchPlayers);
@@ -713,6 +783,10 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
   const [leaderId, setLeaderId] = useState('');
   const [status, setStatus] = useState(hasRealtimeConfig ? 'idle' : 'configuration-error');
   const [error, setError] = useState('');
+  // Group chat for the whole party. Lives at the connection level so it
+  // survives games and screen changes; it resets only when the party code
+  // changes (joining, leaving, or creating a new party).
+  const [chat, setChat] = useState([]);
   const channelRef = useRef(null);
   const eventsRef = useRef(createEventBus());
   const heartbeatsRef = useRef({});
@@ -732,12 +806,14 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
       setLeaderId('');
       setStatus('idle');
       setError('');
+      setChat([]);
       return undefined;
     }
 
     let active = true;
     setStatus('connecting');
     setError('');
+    setChat([]);
     heartbeatsRef.current = {};
     joinedAtRef.current = Date.now();
     const channel = supabase.channel(`${PARTY_PREFIX}${code}`, {
@@ -809,6 +885,9 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
       .on('broadcast', { event: 'party-timeout' }, ({ payload }) => eventsRef.current.emit('timeout', payload))
       .on('broadcast', { event: 'party-duel-answer' }, ({ payload }) => eventsRef.current.emit('duel-answer', payload))
       .on('broadcast', { event: 'party-duel-result' }, ({ payload }) => eventsRef.current.emit('duel-result', payload))
+      .on('broadcast', { event: 'party-chat' }, ({ payload }) => {
+        if (active) setChat((current) => appendChatMessage(current, payload));
+      })
       .subscribe((subscriptionStatus) => {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('ready');
@@ -838,7 +917,15 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
-  return { players, leaderId, status, error, channelRef, events: eventsRef.current };
+  const sendChat = useCallback((text) => {
+    const channel = channelRef.current;
+    if (!channel) return;
+    const msg = { id: createPlayerId(), playerId: playerIdRef.current, name: nameRef.current, text, at: Date.now() };
+    setChat((current) => appendChatMessage(current, msg));
+    channel.send({ type: 'broadcast', event: 'party-chat', payload: msg });
+  }, [playerIdRef]);
+
+  return { players, leaderId, status, error, channelRef, events: eventsRef.current, chat, sendChat };
 }
 
 function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onLeaveParty, onCancel }) {
@@ -1360,6 +1447,8 @@ function Game({ player, match, onFinish, onExit }) {
   const [started, setStarted] = useState(Date.now() >= match.startsAt);
   const [opponentFinished, setOpponentFinished] = useState(false);
   const [opponentConnected, setOpponentConnected] = useState(true);
+  // Match chat lives in component state, so it starts fresh for every match.
+  const [chatMessages, setChatMessages] = useState([]);
   const transitionTimer = useRef(null);
   const localFinal = useRef(null);
   const remoteFinal = useRef(null);
@@ -1438,6 +1527,9 @@ function Game({ player, match, onFinish, onExit }) {
         const players = payload;
         setOpponentConnected(players.some((candidate) => candidate.playerId === match.opponent.id));
       }
+      if (event === 'chat') {
+        setChatMessages((current) => appendChatMessage(current, payload));
+      }
     });
 
     return () => {
@@ -1479,6 +1571,12 @@ function Game({ player, match, onFinish, onExit }) {
     transitionTimer.current = setTimeout(() => advance(nextScore), 850);
   }
 
+  function sendChat(text) {
+    const msg = { id: createPlayerId(), playerId: match.playerId, name: player, text, at: Date.now() };
+    setChatMessages((current) => appendChatMessage(current, msg));
+    match.channel.send({ type: 'broadcast', event: 'chat', payload: msg });
+  }
+
   return (
     <main className="game-shell arena">
       <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{questions.length}</span><button className="icon-button" aria-label="Exit game" onClick={onExit}><X /></button></div>
@@ -1502,6 +1600,7 @@ function Game({ player, match, onFinish, onExit }) {
         <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || 'placeholder'}</div>
         {!started && <div className="match-countdown"><span>RIVAL CONNECTED</span><strong>Get ready…</strong></div>}
       </section>
+      {!match.isBot && <ChatDock title="Match chat" scopeLabel="you and your rival" messages={chatMessages} onSend={sendChat} selfId={match.playerId} />}
     </main>
   );
 }
@@ -1820,6 +1919,7 @@ export default function App() {
 
   return <>
     {content}
+    {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} />}
     {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={() => setConfirmLeave(true)} />}
     {confirmLeave && <ConfirmDialog title="Leave the party?" message="Are you sure you want to leave the party? You'll need the invite link or code to rejoin." confirmLabel="Leave party" onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}
   </>;
