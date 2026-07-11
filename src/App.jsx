@@ -319,6 +319,50 @@ function createBotMatch(playerName) {
   };
 }
 
+// Dialog accessibility (WCAG 2.1.2 / dialog pattern): close on Escape, keep
+// Tab focus inside the dialog, focus it on open, and restore focus on close.
+function useDialogA11y(onClose) {
+  const dialogRef = useRef(null);
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+  useEffect(() => {
+    const node = dialogRef.current;
+    const previouslyFocused = document.activeElement;
+    if (node && !node.contains(document.activeElement)) {
+      const target = node.querySelector('input, select, textarea, button:not(.modal-close)') || node;
+      target.focus?.();
+    }
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !node) return;
+      const focusables = [...node.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])")]
+        .filter((el) => !el.disabled && el.getClientRects().length > 0);
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      previouslyFocused?.focus?.();
+    };
+  }, []);
+  return dialogRef;
+}
+
 function Logo() {
   return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
 }
@@ -369,12 +413,12 @@ function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
   }
 
   return (
-    <div className="chat-dock" role="log" aria-label={`${title} chat`}>
+    <section className="chat-dock" aria-label={`${title} chat`}>
       <div className="chat-head">
         <strong><MessageCircle size={14} /> {title}</strong>
         <button onClick={() => setOpen(false)} aria-label="Minimize chat"><X size={15} /></button>
       </div>
-      <div className="chat-list" ref={listRef}>
+      <div className="chat-list" ref={listRef} role="log" aria-live="polite">
         {messages.length === 0 && <p className="chat-empty">Say hi — only {scopeLabel} can see these messages.</p>}
         {messages.map((msg) => (
           <div key={msg.id} className={msg.playerId === selfId ? 'chat-msg own' : 'chat-msg'}>
@@ -387,7 +431,7 @@ function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
         <input value={text} onChange={(event) => setText(event.target.value)} placeholder="Type a message…" maxLength={CHAT_MAX_LENGTH} aria-label="Chat message" />
         <button type="submit" disabled={!text.trim()} aria-label="Send message"><ArrowRight size={16} /></button>
       </form>
-    </div>
+    </section>
   );
 }
 
@@ -426,14 +470,14 @@ function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPl
           </>
         )}
       </nav>
-      <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">{open ? <X /> : <Menu />}</button>
+      <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation" aria-expanded={open}>{open ? <X /> : <Menu />}</button>
     </header>
   );
 }
 
 function BattleCard() {
   return (
-    <div className="battle-wrap" aria-label="Preview of a live Stemegle battle">
+    <div className="battle-wrap" aria-hidden="true">
       <div className="float-chip chip-one"><FlaskConical size={16} /> Chemistry challenge</div>
       <div className="float-chip chip-two"><Zap size={16} /> Speed bonus</div>
       <div className="battle-card">
@@ -457,6 +501,7 @@ function BattleCard() {
 }
 
 function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescription, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
+  const dialogRef = useDialogA11y(onClose);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -541,7 +586,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="entry-modal" role="dialog" aria-modal="true" aria-labelledby="entry-title">
+      <div className="entry-modal" role="dialog" aria-modal="true" aria-labelledby="entry-title" ref={dialogRef} tabIndex={-1}>
         <button className="modal-close" onClick={onClose} aria-label="Close"><X size={20} /></button>
         <span className="modal-icon">{isGuest ? <Play /> : isLogin ? <Lock /> : <Rocket />}</span>
         <p className="eyebrow">{eyebrow}</p>
@@ -553,13 +598,13 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
           {!isGuest && (
             <label>Password
               <span className="password-field">
-                <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isLogin ? 'Enter your password' : 'At least 8 characters'} autoComplete={isLogin ? 'current-password' : 'new-password'} />
+                <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isLogin ? 'Enter your password' : 'At least 8 characters'} autoComplete={isLogin ? 'current-password' : 'new-password'} aria-describedby={!isGuest && !isLogin ? 'pw-requirements' : undefined} />
                 <button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? <EyeOff /> : <Eye />}</button>
               </span>
             </label>
           )}
           {!isGuest && !isLogin && <label>Confirm password<input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Repeat your password" autoComplete="new-password" /></label>}
-          {!isGuest && !isLogin && <p className={password && !passwordStrong ? 'password-rule invalid' : 'password-rule'}><Lock /> Use 8+ characters with at least one letter and one number.</p>}
+          {!isGuest && !isLogin && <p id="pw-requirements" className={password && !passwordStrong ? 'password-rule invalid' : 'password-rule'}><Lock aria-hidden="true" /> Use 8+ characters with at least one letter and one number.</p>}
           {error && <p className="auth-message error" role="alert">{error}</p>}
           {notice && <p className="auth-message success" role="status">{notice}</p>}
           <button type="submit" className="button button-wide" disabled={!valid || loading}>{loading ? 'Please wait…' : isGuest ? guestActionLabel : isLogin ? 'Log in' : 'Create account'} {!loading && <ArrowRight size={18} />}</button>
@@ -756,11 +801,11 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
   return (
     <main className="game-shell matchmaking-screen">
       <Logo />
-      <div className="radar"><span className="radar-ring r1" /><span className="radar-ring r2" /><span className="radar-ring r3" /><span className="radar-sweep" /><span className="avatar avatar-you radar-avatar">{name[0].toUpperCase()}</span></div>
+      <div className="radar" aria-hidden="true"><span className="radar-ring r1" /><span className="radar-ring r2" /><span className="radar-ring r3" /><span className="radar-sweep" /><span className="avatar avatar-you radar-avatar">{name[0].toUpperCase()}</span></div>
       <p className="eyebrow"><i className="status-dot" /> {hasError ? 'CONNECTION NEEDED' : opponentOnline ? 'OPPONENT ONLINE' : connecting ? 'CONNECTING LIVE' : 'YOU’RE IN THE QUEUE'}</p>
-      <h1>{hasError ? 'Multiplayer is offline' : opponentOnline ? 'Opponent found!' : connecting ? 'Joining the lobby...' : 'Waiting for a rival...'}</h1>
+      <h1 aria-live="polite">{hasError ? 'Multiplayer is offline' : opponentOnline ? 'Opponent found!' : connecting ? 'Joining the lobby...' : 'Waiting for a rival...'}</h1>
       <p>{hasError ? error || 'Supabase environment variables are missing from this deployment.' : opponentOnline ? 'Both players are connected. Your match is starting.' : 'You’ll be matched as soon as another real player comes online'}</p>
-      <div className="search-progress"><i style={{ width: `${progress}%` }} /></div>
+      <div className="search-progress" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} aria-label={opponentOnline ? 'Opponent found — match ready' : 'Searching for opponent'}><i style={{ width: `${progress}%` }} /></div>
       <div className="match-stats">
         <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? 'Rival connected' : 'Waiting for another player'}</span>
         <span><Clock3 /> Waiting {secondsWaiting}s</span>
@@ -1060,9 +1105,10 @@ function PartyPill({ code, count, onReturn, onLeave }) {
 }
 
 function ConfirmDialog({ title, message, confirmLabel, cancelLabel = 'Cancel', onConfirm, onCancel }) {
+  const dialogRef = useDialogA11y(onCancel);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
-      <div className="entry-modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div className="entry-modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" ref={dialogRef} tabIndex={-1}>
         <button className="modal-close" onClick={onCancel} aria-label="Close"><X size={20} /></button>
         <span className="modal-icon"><Users /></span>
         <h2 id="confirm-title">{title}</h2>
@@ -1220,17 +1266,17 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
         <div><small>TEAM B</small><strong>{scores.B.toLocaleString()}</strong><span>{teamB.map((member) => member.name).join(', ')}</span></div>
       </div>
       <section className="question-card">
-        <div className="question-meta"><span><BrainCircuit size={15} /> TEAM {round.team} · {round.playerName} answers</span><span className={time < 5 ? 'timer timer-low' : 'timer'}><Clock3 size={17} /> {time.toFixed(1)}s</span></div>
+        <div className="question-meta"><span><BrainCircuit size={15} aria-hidden="true" /> TEAM {round.team} · {round.playerName} answers</span><span role="timer" className={time < 5 ? 'timer timer-low' : 'timer'} aria-label={`${time.toFixed(1)} seconds remaining`}><Clock3 size={17} aria-hidden="true" /> {time.toFixed(1)}s</span></div>
         <h1>{question.q}</h1>
         <div className="game-answers">
           {question.choices.map((choice, index) => {
             let state = '';
             if (selected !== null && index === question.answer) state = 'correct';
             else if (selected === index) state = 'wrong';
-            return <button className={state} key={`${round.id}-${choice}`} onClick={() => choose(index)} disabled={!started || !isActive || selected !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
+            return <button aria-label={`Option ${String.fromCharCode(65 + index)}: ${choice}${state === 'correct' ? ' — correct answer' : state === 'wrong' ? ' — incorrect' : ''}`} className={state} key={`${round.id}-${choice}`} onClick={() => choose(index)} disabled={!started || !isActive || selected !== null}><span aria-hidden="true">{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check aria-hidden="true" />}{state === 'wrong' && <X aria-hidden="true" />}</button>;
           })}
         </div>
-        <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || (isActive ? 'Your turn — answer fast.' : `Waiting for ${round.playerName}.`)}</div>
+        <div className={feedback ? 'feedback show' : 'feedback'} role="status">{feedback || (isActive ? 'Your turn — answer fast.' : `Waiting for ${round.playerName}.`)}</div>
         {!started && <div className="match-countdown"><span>PARTY READY</span><strong>Get ready…</strong></div>}
       </section>
       <div className="party-turn-strip">
@@ -1416,17 +1462,17 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
         <div><small>DUELIST</small><strong>{pair[1]?.name || 'BYE'}</strong><span>{pair[1] ? (duelAnswers[pair[1].playerId]?.gain?.toLocaleString?.() || 'Waiting') : 'Auto advance'}</span></div>
       </div>
       <section className="question-card">
-        <div className="question-meta"><span><Medal size={15} /> {isDuelist ? 'YOUR DUEL' : 'SPECTATING DUEL'}</span><span className={time < 5 ? 'timer timer-low' : 'timer'}><Clock3 size={17} /> {time.toFixed(1)}s</span></div>
+        <div className="question-meta"><span><Medal size={15} aria-hidden="true" /> {isDuelist ? 'YOUR DUEL' : 'SPECTATING DUEL'}</span><span role="timer" className={time < 5 ? 'timer timer-low' : 'timer'} aria-label={`${time.toFixed(1)} seconds remaining`}><Clock3 size={17} aria-hidden="true" /> {time.toFixed(1)}s</span></div>
         <h1>{question.q}</h1>
         <div className="game-answers">
           {question.choices.map((choice, index) => {
             let state = '';
             if (selected !== null && index === question.answer) state = 'correct';
             else if (selected === index) state = 'wrong';
-            return <button className={state} key={`${duelId}-${choice}`} onClick={() => choose(index)} disabled={!started || !isDuelist || hasAnswered || selected !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
+            return <button aria-label={`Option ${String.fromCharCode(65 + index)}: ${choice}${state === 'correct' ? ' — correct answer' : state === 'wrong' ? ' — incorrect' : ''}`} className={state} key={`${duelId}-${choice}`} onClick={() => choose(index)} disabled={!started || !isDuelist || hasAnswered || selected !== null}><span aria-hidden="true">{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check aria-hidden="true" />}{state === 'wrong' && <X aria-hidden="true" />}</button>;
           })}
         </div>
-        <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || (isDuelist ? 'Answer fast. Higher score advances.' : 'Watch this 1v1 — your turn may be next.')}</div>
+        <div className={feedback ? 'feedback show' : 'feedback'} role="status">{feedback || (isDuelist ? 'Answer fast. Higher score advances.' : 'Watch this 1v1 — your turn may be next.')}</div>
         {!started && <div className="match-countdown"><span>BRACKET READY</span><strong>Get ready…</strong></div>}
       </section>
       <div className="party-turn-strip">
@@ -1585,19 +1631,19 @@ function Game({ player, match, onFinish, onExit }) {
         <div className="vs-badge">VS</div>
         <div className="game-player rival"><b>{opponentScore.toLocaleString()}</b><div><small>{opponentFinished ? 'FINISHED' : opponentConnected ? 'RIVAL · LIVE' : 'RECONNECTING'}</small><strong>{opponent}</strong></div><span className="avatar avatar-nova">{opponent[0]}</span></div>
       </div>
-      <div className="game-progress"><i style={{ width: `${((questionIndex + 1) / questions.length) * 100}%` }} /></div>
+      <div className="game-progress" role="progressbar" aria-valuenow={questionIndex + 1} aria-valuemin={1} aria-valuemax={questions.length} aria-label={`Question ${questionIndex + 1} of ${questions.length}`}><i style={{ width: `${((questionIndex + 1) / questions.length) * 100}%` }} /></div>
       <section className="question-card">
-        <div className="question-meta"><span><BrainCircuit size={15} /> {question.category.toUpperCase()}</span><span className={time < 5 ? 'timer timer-low' : 'timer'}><Clock3 size={17} /> {time.toFixed(1)}s</span></div>
+        <div className="question-meta"><span><BrainCircuit size={15} aria-hidden="true" /> {question.category.toUpperCase()}</span><span role="timer" className={time < 5 ? 'timer timer-low' : 'timer'} aria-label={`${time.toFixed(1)} seconds remaining`}><Clock3 size={17} aria-hidden="true" /> {time.toFixed(1)}s</span></div>
         <h1>{question.q}</h1>
         <div className="game-answers">
           {question.choices.map((choice, index) => {
             let state = '';
             if (selected !== null && index === question.answer) state = 'correct';
             else if (selected === index) state = 'wrong';
-            return <button className={state} key={choice} onClick={() => choose(index)} disabled={!started || selected !== null || localFinal.current !== null}><span>{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check />}{state === 'wrong' && <X />}</button>;
+            return <button aria-label={`Option ${String.fromCharCode(65 + index)}: ${choice}${state === 'correct' ? ' — correct answer' : state === 'wrong' ? ' — incorrect' : ''}`} className={state} key={choice} onClick={() => choose(index)} disabled={!started || selected !== null || localFinal.current !== null}><span aria-hidden="true">{String.fromCharCode(65 + index)}</span>{choice}{state === 'correct' && <Check aria-hidden="true" />}{state === 'wrong' && <X aria-hidden="true" />}</button>;
           })}
         </div>
-        <div className={feedback ? 'feedback show' : 'feedback'}>{feedback || 'placeholder'}</div>
+        <div className={feedback ? 'feedback show' : 'feedback'} role="status">{feedback}</div>
         {!started && <div className="match-countdown"><span>RIVAL CONNECTED</span><strong>Get ready…</strong></div>}
       </section>
       {!match.isBot && <ChatDock title="Match chat" scopeLabel="you and your rival" messages={chatMessages} onSend={sendChat} selfId={match.playerId} />}
@@ -1611,7 +1657,7 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
     return (
       <main className="game-shell results-screen">
         <Logo />
-        <div className="result-emblem win">{isTournament ? <Medal /> : <Trophy />}</div>
+        <div className="result-emblem win" role="img" aria-label={isTournament ? 'Tournament complete' : 'Team battle complete'}>{isTournament ? <Medal aria-hidden="true" /> : <Trophy aria-hidden="true" />}</div>
         <p className="eyebrow">{isTournament ? 'TOURNAMENT COMPLETE' : 'TEAM BATTLE COMPLETE'}</p>
         <h1>{isTournament ? `${result.champion} wins!` : result.summary}</h1>
         <p>{isTournament ? 'The bracket is complete and the party has one champion.' : 'The party team battle finished with every player rotating through the questions.'}</p>
@@ -1643,7 +1689,7 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
   return (
     <main className="game-shell results-screen">
       <Logo />
-      <div className={won ? 'result-emblem win' : 'result-emblem'}>{won ? <Trophy /> : <BrainCircuit />}</div>
+      <div className={won ? 'result-emblem win' : 'result-emblem'} role="img" aria-label={won ? 'You won this match' : 'Match complete'}>{won ? <Trophy aria-hidden="true" /> : <BrainCircuit aria-hidden="true" />}</div>
       <p className="eyebrow">{result.vsBot ? 'PRACTICE MATCH COMPLETE' : 'MATCH COMPLETE'}</p>
       <h1>{won ? 'Brilliant win!' : 'So close. Run it back?'}</h1>
       <p>{result.vsBot ? 'Practice match against a bot — it counts toward matches played, but not your ranked score.' : won ? 'Fast thinking pays off. Your rank is moving up.' : 'Every match sharpens the mind. Your next rival is waiting.'}</p>
@@ -1661,21 +1707,22 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
 function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
       {authNotice && <div className="auth-notice" role="status">{authNotice}<button onClick={onNoticeClose} aria-label="Dismiss"><X size={16} /></button></div>}
       <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
-        <span className="leaderboard-fab-icon"><Trophy /></span>
+        <span className="leaderboard-fab-icon"><Trophy aria-hidden="true" /></span>
         <span><small>{accountRank ? `YOUR RANK · #${accountRank.rank_position}` : 'LIVE GLOBAL RANKS'}</small><strong>{accountRank ? 'Climb even higher' : 'Can you take the top spot?'}</strong></span>
         <ChevronRight />
       </a>
-      <main>
+      <main id="main-content">
         <section className="hero">
           <div className="hero-copy">
             <div className="social-proof">
-              <Globe2 size={22} />
+              <Globe2 size={22} aria-hidden="true" />
               <span>{onlineCount !== null ? <><b>{onlineCount.toLocaleString()}</b> online now</> : <><b>Live</b> matchmaking is online</>}</span>
-              {gamesPlayed !== null && <span className="games-played-chip"><Zap size={12} /> <b>{gamesPlayed.toLocaleString()}</b> matches completed all time</span>}
-              {registeredUsers !== null && <span className="games-played-chip"><CircleUserRound size={12} /> <b>{registeredUsers.toLocaleString()}</b> accounts created</span>}
+              {gamesPlayed !== null && <span className="games-played-chip"><Zap size={12} aria-hidden="true" /> <b>{gamesPlayed.toLocaleString()}</b> matches completed all time</span>}
+              {registeredUsers !== null && <span className="games-played-chip"><CircleUserRound size={12} aria-hidden="true" /> <b>{registeredUsers.toLocaleString()}</b> accounts created</span>}
             </div>
             <p className="eyebrow">REAL-TIME STEM SHOWDOWNS</p>
             <h1>Think fast.<br />Win <em>faster.</em></h1>
@@ -1683,24 +1730,24 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
             <div className="hero-actions">
               {accountName ? (
                 <>
-                  <button className="button button-large" onClick={onAccountPlay}><Play fill="currentColor" size={18} /> Play with my account</button>
-                  <button className="button button-secondary button-large" onClick={onParty}><Users size={18} /> Play with friends</button>
-                  <span className="signed-in-copy"><Check /> Signed in as <b>{accountName}</b></span>
+                  <button className="button button-large" onClick={onAccountPlay}><Play fill="currentColor" size={18} aria-hidden="true" /> Play with my account</button>
+                  <button className="button button-secondary button-large" onClick={onParty}><Users size={18} aria-hidden="true" /> Play with friends</button>
+                  <span className="signed-in-copy"><Check aria-hidden="true" /> Signed in as <b>{accountName}</b></span>
                 </>
               ) : (
                 <>
-                  <button className="button button-large" onClick={onCreate}>Create account <ArrowRight size={18} /></button>
-                  <button className="button button-secondary button-large" onClick={onParty}><Users size={18} /> Play with friends</button>
-                  <button className="button button-secondary button-large" onClick={onGuest}><Play size={18} /> Play as guest</button>
+                  <button className="button button-large" onClick={onCreate}>Create account <ArrowRight size={18} aria-hidden="true" /></button>
+                  <button className="button button-secondary button-large" onClick={onParty}><Users size={18} aria-hidden="true" /> Play with friends</button>
+                  <button className="button button-secondary button-large" onClick={onGuest}><Play size={18} aria-hidden="true" /> Play as guest</button>
                 </>
               )}
             </div>
-            <p className="fine-print"><Check size={14} /> Free to play <Check size={14} /> No download <Check size={14} /> Match in seconds</p>
+            <p className="fine-print"><Check size={14} aria-hidden="true" /> Free to play <Check size={14} aria-hidden="true" /> No download <Check size={14} aria-hidden="true" /> Match in seconds</p>
           </div>
           <BattleCard />
         </section>
 
-        <section className="ticker" aria-label="Popular STEM categories"><div><span><Atom /> PHYSICS</span><i>✦</i><span><FlaskConical /> CHEMISTRY</span><i>✦</i><span><Orbit /> SPACE</span><i>✦</i><span><BrainCircuit /> BIOLOGY</span><i>✦</i><span><Bolt /> MATHEMATICS</span></div></section>
+        <section className="ticker" aria-label="Popular STEM categories"><div><span><Atom aria-hidden="true" /> PHYSICS</span><i aria-hidden="true">✦</i><span><FlaskConical aria-hidden="true" /> CHEMISTRY</span><i aria-hidden="true">✦</i><span><Orbit aria-hidden="true" /> SPACE</span><i aria-hidden="true">✦</i><span><BrainCircuit aria-hidden="true" /> BIOLOGY</span><i aria-hidden="true">✦</i><span><Bolt aria-hidden="true" /> MATHEMATICS</span></div></section>
 
         <section className="party-section" id="party">
           <div>
@@ -1709,9 +1756,9 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
             <p>Create a private code, invite friends, and play either auto-balanced XvX team battles or a 1v1 elimination tournament.</p>
           </div>
           <div className="party-feature-grid">
-            <article><Swords /><strong>Auto XvX split</strong><span>Odd parties give one team the extra player.</span></article>
-            <article><Shuffle /><strong>Rotating turns</strong><span>Everyone answers at least once; small parties cap at two turns each.</span></article>
-            <article><Medal /><strong>Tournament mode</strong><span>1v1 duels advance to one final winner.</span></article>
+            <article><Swords aria-hidden="true" /><strong>Auto XvX split</strong><span>Odd parties give one team the extra player.</span></article>
+            <article><Shuffle aria-hidden="true" /><strong>Rotating turns</strong><span>Everyone answers at least once; small parties cap at two turns each.</span></article>
+            <article><Medal aria-hidden="true" /><strong>Tournament mode</strong><span>1v1 duels advance to one final winner.</span></article>
           </div>
           <button className="button button-large" onClick={onParty}><Users /> Create or join a party</button>
         </section>
@@ -1719,28 +1766,34 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
         <section className="how-section" id="how">
           <div className="section-heading"><p className="eyebrow">YOUR BRAIN. THEIR CLOCK.</p><h2>Three steps to glory.</h2><p>No tutorials. No waiting rooms. Just pure knowledge under pressure.</p></div>
           <div className="steps">
-            <article><span className="step-number">01</span><div className="step-icon"><CircleUserRound /></div><h3>Pick your identity</h3><p>Create an account to save your rank, or jump in instantly as a named guest.</p><ChevronRight /></article>
-            <article className="featured-step"><span className="step-number">02</span><div className="step-icon"><Globe2 /></div><h3>Meet your match</h3><p>We pair you live with a challenger at your skill level. The countdown starts.</p><ChevronRight /></article>
-            <article><span className="step-number">03</span><div className="step-icon"><Zap /></div><h3>Answer. Faster.</h3><p>Correct answers score. Fast answers score more. Win, streak, and rise.</p></article>
+            <article><span className="step-number" aria-hidden="true">01</span><div className="step-icon" aria-hidden="true"><CircleUserRound /></div><h3>Pick your identity</h3><p>Create an account to save your rank, or jump in instantly as a named guest.</p><ChevronRight aria-hidden="true" /></article>
+            <article className="featured-step"><span className="step-number" aria-hidden="true">02</span><div className="step-icon" aria-hidden="true"><Globe2 /></div><h3>Meet your match</h3><p>We pair you live with a challenger at your skill level. The countdown starts.</p><ChevronRight aria-hidden="true" /></article>
+            <article><span className="step-number" aria-hidden="true">03</span><div className="step-icon" aria-hidden="true"><Zap /></div><h3>Answer. Faster.</h3><p>Correct answers score. Fast answers score more. Win, streak, and rise.</p></article>
           </div>
         </section>
 
         <section className="leader-section" id="leaderboard">
-          <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every account has a global rank. Scores from signed-in battles move that rank; guest battles count toward the match total but are not attached to an account.</p><div className="rank-stat"><Trophy /><span><b>{gamesPlayed === null ? 'Loading live total…' : `${gamesPlayed.toLocaleString()} matches completed`}</b><small>Verified from recorded match IDs</small></span></div><button className="button button-light" onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'Play a ranked match' : 'Claim your rank'} <ArrowRight /></button></div>
+          <div className="rank-callout"><p className="eyebrow">ONE PLANET. ONE RANK.</p><h2>How smart<br />is the world?</h2><p>Every account has a global rank. Scores from signed-in battles move that rank; guest battles count toward the match total but are not attached to an account.</p><div className="rank-stat"><Trophy aria-hidden="true" /><span><b>{gamesPlayed === null ? 'Loading live total…' : `${gamesPlayed.toLocaleString()} matches completed`}</b><small>Verified from recorded match IDs</small></span></div><button className="button button-light" onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'Play a ranked match' : 'Claim your rank'} <ArrowRight /></button></div>
           <div className="leaderboard-card">
             <div className="leader-header"><div><span className="live-pill"><i /> LIVE</span><h3>Global leaderboard</h3></div><span>ALL-TIME RANKS</span></div>
-            <div className="leader-cols"><span>RANK & ACCOUNT</span><span>WINS</span><span>SCORE</span></div>
-            {Array.isArray(leaders) && leaders.map((leader) => <div className="leader-row" key={leader.id}><span className={leader.rank_position <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank_position}</span><span className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong>{leader.battle_name}{leader.rank_position === 1 && <Crown size={14} />}</strong><span className="streak">{leader.wins.toLocaleString()}</span><b>{leader.total_score.toLocaleString()}</b></div>)}
-            {leaders === null && <div className="leader-empty"><Globe2 /><strong>Loading live rankings…</strong><span>Connecting to the global leaderboard.</span></div>}
-            {leaders === false && <div className="leader-empty"><Globe2 /><strong>Rankings temporarily unavailable</strong><span>Live data could not be loaded. Please try again shortly.</span></div>}
-            {Array.isArray(leaders) && leaders.length === 0 && <div className="leader-empty"><Trophy /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
+            <div role="table" aria-label="Global leaderboard rankings">
+              <div role="rowgroup">
+                <div className="leader-cols" role="row"><span role="columnheader">RANK & ACCOUNT</span><span role="columnheader">WINS</span><span role="columnheader">SCORE</span></div>
+              </div>
+              <div role="rowgroup">
+                {Array.isArray(leaders) && leaders.map((leader) => <div className="leader-row" role="row" key={leader.id}><span role="cell" className={leader.rank_position <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank_position}</span><span role="presentation" className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong role="cell">{leader.battle_name}{leader.rank_position === 1 && <><Crown size={14} aria-hidden="true" /><span className="sr-only"> — Champion</span></>}</strong><span role="cell" className="streak">{leader.wins.toLocaleString()}</span><b role="cell">{leader.total_score.toLocaleString()}</b></div>)}
+                {leaders === null && <div className="leader-empty"><Globe2 aria-hidden="true" /><strong>Loading live rankings…</strong><span>Connecting to the global leaderboard.</span></div>}
+                {leaders === false && <div className="leader-empty"><Globe2 aria-hidden="true" /><strong>Rankings temporarily unavailable</strong><span>Live data could not be loaded. Please try again shortly.</span></div>}
+                {Array.isArray(leaders) && leaders.length === 0 && <div className="leader-empty"><Trophy aria-hidden="true" /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
+              </div>
+            </div>
             <div className="your-rank"><span>{accountRank ? `#${accountRank.rank_position}` : '—'}</span><span className="leader-avatar">{accountName ? accountName[0].toUpperCase() : 'Y'}</span><strong>{accountRank ? `${accountRank.total_score.toLocaleString()} score · ${accountRank.matches_played.toLocaleString()} ranked matches` : accountName ? 'Loading your global rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
           </div>
         </section>
 
-        <section className="final-cta"><div className="cta-orbit orbit-one" /><div className="cta-orbit orbit-two" /><span className="cta-icon"><Rocket /></span><p className="eyebrow">YOUR NEXT RIVAL IS ONLINE</p><h2>Ready to put your<br />brain on the board?</h2><p>One name. Five questions. Infinite bragging rights.</p><button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" /> {accountName ? 'Play a ranked match' : 'Start battling — it’s free'}</button></section>
+        <section className="final-cta"><div className="cta-orbit orbit-one" aria-hidden="true" /><div className="cta-orbit orbit-two" aria-hidden="true" /><span className="cta-icon" aria-hidden="true"><Rocket /></span><p className="eyebrow">YOUR NEXT RIVAL IS ONLINE</p><h2>Ready to put your<br />brain on the board?</h2><p>One name. Five questions. Infinite bragging rights.</p><button className="button button-large" onClick={accountName ? onAccountPlay : onGuest}><Play fill="currentColor" aria-hidden="true" /> {accountName ? 'Play a ranked match' : 'Start battling — it\'s free'}</button></section>
       </main>
-      <footer><Logo /><p>Competitive STEM for curious minds everywhere.</p><CloudflareBadge /><span>© 2026 Stemegle</span></footer>
+      <footer><Logo /><p>Competitive STEM for curious minds everywhere.</p><CloudflareBadge /><a className="footer-a11y" href="mailto:ritvik.shah@gsynergy.com?subject=Stemegle%20accessibility%20feedback">Accessibility feedback</a><span>© 2026 Stemegle</span></footer>
     </div>
   );
 }
