@@ -3,13 +3,14 @@ import WebSocket from 'ws';
 import { createRealtimeClient } from '../src/lib/realtime.js';
 
 const baseUrl = new URL(process.env.STEMEGLE_URL || 'http://127.0.0.1:8787');
+const requestOrigin = new URL(process.env.STEMEGLE_ORIGIN || baseUrl.origin).origin;
 const socketUrl = new URL('/api/realtime', baseUrl);
 socketUrl.protocol = baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
 
 function client() {
   return createRealtimeClient({
     url: socketUrl,
-    webSocketFactory: (url) => new WebSocket(url, { origin: baseUrl.origin }),
+    webSocketFactory: (url) => new WebSocket(url, { origin: requestOrigin }),
     subscribeTimeoutMs: 5000,
     ackTimeoutMs: 5000,
   });
