@@ -12,6 +12,7 @@ BACKEND_IMAGE="${STEMEGLE_IMAGE_PREFIX}-backend:latest"
 BACKUP_IMAGE="${STEMEGLE_IMAGE_PREFIX}-postgres-tools:latest"
 
 mkdir -p "$(dirname "$DEPLOY_SOURCE_DIR")"
+git config --global --replace-all safe.directory "$DEPLOY_SOURCE_DIR"
 
 if [[ ! -d "$DEPLOY_SOURCE_DIR/.git" ]]; then
   rm -rf "$DEPLOY_SOURCE_DIR"
