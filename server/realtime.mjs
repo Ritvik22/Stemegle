@@ -21,6 +21,7 @@ const DEFAULT_MAX_CONNECTIONS_PER_IP = 250;
 const DEFAULT_MAX_MESSAGES_PER_MINUTE = 600;
 const DEFAULT_MATCH_TICKET_TTL_MS = 45 * 60 * 1000;
 const DEFAULT_MINIMUM_MATCH_DURATION_MS = 3000;
+const DEFAULT_QUESTION_TRANSITION_MS = 500;
 const MATCH_EVENTS = new Set(['ready', 'start', 'answer', 'score', 'finish', 'chat']);
 const PARTY_EVENTS = new Set([
   'party-start',
@@ -182,6 +183,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
     maxMessagesPerMinute = DEFAULT_MAX_MESSAGES_PER_MINUTE,
     matchTicketTtlMs = DEFAULT_MATCH_TICKET_TTL_MS,
     minimumMatchDurationMs = DEFAULT_MINIMUM_MATCH_DURATION_MS,
+    questionTransitionMs = DEFAULT_QUESTION_TRANSITION_MS,
     getSessionUserId = async () => null,
   } = options;
   const originAllowlist = allowedOrigins === undefined
@@ -459,14 +461,15 @@ export function attachRealtimeServer(httpServer, options = {}) {
           || payload.questionIndex >= run.questionCount
           || !Number.isInteger(payload.selected)
           || payload.selected < -1
-          || payload.selected > 3
-          || !Number.isInteger(payload.responseMs)
-          || payload.responseMs < 0
-          || payload.responseMs > 15_000) {
+          || payload.selected > 3) {
           return 'Match answer payload is invalid.';
         }
-        if (run.answers.get(state.presenceKey)?.has(payload.questionIndex)) {
-          return 'This question already has an answer.';
+        const progress = run.progress.get(state.presenceKey);
+        if (payload.questionIndex !== progress.nextQuestionIndex) {
+          return 'Match answers must be submitted in order.';
+        }
+        if (Date.now() < progress.questionAvailableAt) {
+          return 'This question is not available yet.';
         }
         return null;
       }
@@ -479,15 +482,8 @@ export function attachRealtimeServer(httpServer, options = {}) {
           if (Date.now() < run.startsAt + minimumMatchDurationMs) {
             return 'The match finished before the minimum play window.';
           }
-          const previous = run.finishes.get(state.presenceKey);
-          if (previous !== undefined && previous !== payload.score) {
-            return 'A final score was already recorded for this player.';
-          }
           if ((run.answers.get(state.presenceKey)?.size ?? 0) !== run.questionCount) {
             return 'Every match question must be answered before finishing.';
-          }
-          if ((run.scores.get(state.presenceKey) ?? 0) !== payload.score) {
-            return 'Final score does not match the server-recorded answers.';
           }
         }
         return null;
@@ -566,6 +562,10 @@ export function attachRealtimeServer(httpServer, options = {}) {
           questions: validatedMatchQuestions(matchId, message.payload.questions),
           answers: new Map(participants.map((participant) => [participant, new Map()])),
           scores: new Map(participants.map((participant) => [participant, 0])),
+          progress: new Map(participants.map((participant) => [participant, {
+            nextQuestionIndex: 0,
+            questionAvailableAt: message.payload.startsAt,
+          }])),
           finishes: new Map(),
           expiresAt: Date.now() + matchTicketTtlMs,
         });
@@ -575,20 +575,28 @@ export function attachRealtimeServer(httpServer, options = {}) {
       const matchId = state.topic.slice(MATCH_TOPIC_PREFIX.length);
       const run = matchRuns.get(matchId);
       const question = run.questions[message.payload.questionIndex];
+      const progress = run.progress.get(state.presenceKey);
+      const responseMs = Math.min(15_000, Math.max(0, Date.now() - progress.questionAvailableAt));
       const correct = message.payload.selected === question.answer;
-      const remainingSeconds = (15_000 - message.payload.responseMs) / 1000;
+      const remainingSeconds = (15_000 - responseMs) / 1000;
       const gain = correct ? 500 + Math.round(remainingSeconds * 45) : 0;
       run.answers.get(state.presenceKey).set(message.payload.questionIndex, {
         selected: message.payload.selected,
-        responseMs: message.payload.responseMs,
+        responseMs,
         correct,
         gain,
       });
       run.scores.set(state.presenceKey, (run.scores.get(state.presenceKey) ?? 0) + gain);
+      progress.nextQuestionIndex += 1;
+      progress.questionAvailableAt = Date.now() + questionTransitionMs;
     }
+    let broadcastPayload = message.payload;
     if (participants && message.event === 'finish') {
       const matchId = state.topic.slice(MATCH_TOPIC_PREFIX.length);
-      matchRuns.get(matchId).finishes.set(state.presenceKey, message.payload.score);
+      const run = matchRuns.get(matchId);
+      const serverScore = run.scores.get(state.presenceKey) ?? 0;
+      run.finishes.set(state.presenceKey, serverScore);
+      broadcastPayload = { ...message.payload, score: serverScore };
     }
 
     send(state, { type: 'ack', ref: message.ref });
@@ -597,7 +605,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
       type: 'broadcast',
       topic: state.topic,
       event: message.event,
-      payload: message.payload,
+      payload: broadcastPayload,
       eventId: message.eventId,
     }, state);
   }

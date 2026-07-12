@@ -1613,6 +1613,7 @@ function Game({ player, match, onFinish, onExit }) {
   const [chatMessages, setChatMessages] = useState([]);
   const transitionTimer = useRef(null);
   const localFinal = useRef(null);
+  const localFinishSent = useRef(false);
   const remoteFinal = useRef(null);
   const deliveredResult = useRef(false);
   const startedTracked = useRef(false);
@@ -1661,16 +1662,20 @@ function Game({ player, match, onFinish, onExit }) {
   }, [attemptId, gameMode, match.id, onFinish, questions.length]);
 
   const finishLocal = useCallback((finalScore) => {
-    if (localFinal.current !== null) return;
-    localFinal.current = finalScore;
+    if (localFinishSent.current) return;
+    localFinishSent.current = true;
     setFeedback(remoteFinal.current === null ? 'Finished! Waiting for your rival…' : 'Match complete!');
+    if (match.isBot) {
+      localFinal.current = finalScore;
+      deliverResult(finalScore, remoteFinal.current);
+      return;
+    }
     match.channel.send({
       type: 'broadcast',
       event: 'finish',
       payload: { playerId: match.playerId, score: finalScore },
     });
-    deliverResult(finalScore, remoteFinal.current);
-  }, [deliverResult, match.channel, match.playerId]);
+  }, [deliverResult, match.channel, match.isBot, match.playerId]);
 
   const advance = useCallback((finalScore) => {
     if (questionIndex === questions.length - 1) {
@@ -1705,7 +1710,12 @@ function Game({ player, match, onFinish, onExit }) {
         setOpponentScore(payload.score);
       }
       if (event === 'finish') {
-        if (payload.playerId === match.playerId) return;
+        if (payload.playerId === match.playerId) {
+          localFinal.current = payload.score;
+          setScore(payload.score);
+          deliverResult(payload.score, remoteFinal.current);
+          return;
+        }
         remoteFinal.current = payload.score;
         opponentScoreRef.current = payload.score;
         setOpponentScore(payload.score);

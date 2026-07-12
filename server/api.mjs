@@ -211,10 +211,8 @@ export function createApiRouter({
       res.status(409).json({ error: 'Both players must finish before this result can be recorded' });
       return;
     }
-    if (authorization.score !== score || authorization.opponentScore !== opponentScore) {
-      res.status(409).json({ error: 'Match scores do not match the realtime result' });
-      return;
-    }
+    const resolvedScore = authorization.score;
+    const resolvedOpponentScore = authorization.opponentScore;
 
     try {
       const session = await getSession(req);
@@ -242,7 +240,7 @@ export function createApiRouter({
           return { matchInserted: Boolean(match.rowCount), ranked: false, stats: null };
         }
 
-        const didWin = score >= opponentScore;
+        const didWin = resolvedScore >= resolvedOpponentScore;
         const existingResult = await client.query(
           'select 1 from match_results where match_id = $1 and user_id = $2',
           [matchId, rankedUserId],
@@ -263,7 +261,7 @@ export function createApiRouter({
            ) values ($1, $2, $3, $4, $5, $6)
            on conflict do nothing
            returning match_id`,
-          [matchId, rankedUserId, playerId, score, opponentScore, didWin],
+          [matchId, rankedUserId, playerId, resolvedScore, resolvedOpponentScore, didWin],
         );
 
         if (inserted.rowCount) {
@@ -278,7 +276,7 @@ export function createApiRouter({
               best_streak = greatest(best_streak, case when $3 then streak + 1 else 0 end),
               updated_at = now()
             where user_id = $1
-          `, [rankedUserId, score, didWin]);
+          `, [rankedUserId, resolvedScore, didWin]);
         }
 
         const profile = await client.query(
@@ -289,7 +287,7 @@ export function createApiRouter({
           matchInserted: Boolean(match.rowCount),
           ranked: true,
           stats: {
-            xpGained: inserted.rowCount ? score : 0,
+            xpGained: inserted.rowCount ? resolvedScore : 0,
             streak: Number(profile.rows[0]?.streak || 0),
             totalXp: Number(profile.rows[0]?.total_score || 0),
           },
@@ -297,7 +295,13 @@ export function createApiRouter({
       });
 
       if (result.matchInserted || result.stats?.xpGained) notifyStats();
-      res.json({ recorded: result.matchInserted, ranked: result.ranked, stats: result.stats });
+      res.json({
+        recorded: result.matchInserted,
+        ranked: result.ranked,
+        score: resolvedScore,
+        opponentScore: resolvedOpponentScore,
+        stats: result.stats,
+      });
     } catch (error) {
       next(error);
     }

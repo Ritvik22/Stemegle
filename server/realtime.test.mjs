@@ -291,7 +291,7 @@ test('broadcasts echo to self, reach peers, dedupe event ids, and reject invalid
 });
 
 test('match topics bind participants, accounts, lifecycle, and host-only events', async () => {
-  const fixture = await createFixture({ minimumMatchDurationMs: 0 });
+  const fixture = await createFixture({ minimumMatchDurationMs: 0, questionTransitionMs: 0 });
   const host = await openPeer(fixture.url, { headers: { 'x-test-user': 'user-a' } });
   const guest = await openPeer(fixture.url, { headers: { 'x-test-user': 'user-b' } });
   const intruder = await openPeer(fixture.url);
@@ -353,13 +353,34 @@ test('match topics bind participants, accounts, lifecycle, and host-only events'
       channelId: 'match-host',
       event: 'start',
       payload: {
-        startsAt: Date.now() - 100,
+        startsAt: Date.now() + 50,
         questions: getQuestionsForMatch('player-a--player-b'),
       },
     });
     await host.next((message) => message.type === 'ack' && message.ref === 'host-start');
     const start = await guest.next((message) => message.type === 'broadcast' && message.event === 'start');
     assert.equal(start.payload.questions.length, 5);
+
+    host.send({
+      type: 'broadcast',
+      ref: 'out-of-order-answer',
+      channelId: 'match-host',
+      event: 'answer',
+      payload: { playerId: 'player-a', questionIndex: 1, selected: 0, responseMs: 0 },
+    });
+    const orderError = await host.next((message) => message.ref === 'out-of-order-answer');
+    assert.equal(orderError.code, 'forbidden_sender');
+
+    host.send({
+      type: 'broadcast',
+      ref: 'answer-before-start',
+      channelId: 'match-host',
+      event: 'answer',
+      payload: { playerId: 'player-a', questionIndex: 0, selected: 0, responseMs: 0 },
+    });
+    const timingError = await host.next((message) => message.ref === 'answer-before-start');
+    assert.equal(timingError.code, 'forbidden_sender');
+    await new Promise((resolve) => setTimeout(resolve, 60));
 
     guest.send({
       type: 'broadcast',
@@ -408,7 +429,7 @@ test('match topics bind participants, accounts, lifecycle, and host-only events'
       playerId: 'player-a',
     });
     assert.equal(completedAuthorization.pending, false);
-    assert.equal(completedAuthorization.score, 2500);
+    assert.ok(completedAuthorization.score > 0 && completedAuthorization.score <= 5875);
     assert.equal(completedAuthorization.opponentScore, 0);
   } finally {
     await host.close();
