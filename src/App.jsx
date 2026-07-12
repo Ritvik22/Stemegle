@@ -31,6 +31,14 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import AdminDashboard from './AdminDashboard';
+import {
+  getAnalyticsSignupToken,
+  initializeAnalytics,
+  setAnalyticsAccessToken,
+  trackAnalyticsEvent,
+  trackPageView,
+} from './lib/analytics';
 import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePlayers, hasRealtimeConfig, recordBotMatch, recordMatchResult, supabase } from './lib/supabase';
 import { getQuestionsForMatch } from './data/questions';
 
@@ -447,7 +455,7 @@ function CloudflareBadge() {
   );
 }
 
-function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   const [open, setOpen] = useState(false);
   return (
     <header className="site-header">
@@ -459,6 +467,7 @@ function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPl
         {accountName ? (
           <>
             <span className="account-pill"><i>{accountName[0].toUpperCase()}</i><span><small>SIGNED IN</small>{accountName}</span></span>
+            {canViewAdmin && <button className="nav-login" onClick={onAdmin}><BarChart3 size={15} /> Analytics</button>}
             <button className="nav-login" onClick={onLogout}>Log out</button>
             <button className="button button-small" onClick={onAccountPlay}>Play now <ArrowRight size={15} /></button>
           </>
@@ -547,15 +556,21 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         return;
       }
 
+      trackAnalyticsEvent('signup_started');
+      const analyticsSignupToken = await getAnalyticsSignupToken();
       const { data, error: signUpError } = await supabase.auth.signUp({
         email: email.trim().toLowerCase(),
         password,
         options: {
-          data: { battle_name: name.trim() },
+          data: {
+            battle_name: name.trim(),
+            ...(analyticsSignupToken ? { analytics_signup_token: analyticsSignupToken } : {}),
+          },
           emailRedirectTo: AUTH_REDIRECT_URL,
         },
       });
       if (signUpError) throw signUpError;
+      trackAnalyticsEvent('signup_succeeded', { status: data.session ? 'confirmed' : 'confirmation_pending' });
       if (data.session) {
         onAuthSuccess();
       } else {
@@ -622,6 +637,12 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
   const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'configuration-error');
   const [error, setError] = useState('');
   const playerId = useRef(createPlayerId());
+  const queueConnectedTracked = useRef(false);
+  const opponentFoundTracked = useRef(false);
+
+  useEffect(() => {
+    trackAnalyticsEvent('queue_started');
+  }, []);
 
   useEffect(() => {
     const waitTicker = setInterval(() => setSecondsWaiting((seconds) => seconds + 1), 1000);
@@ -705,6 +726,10 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
           if (matchPlayers.length === 2 && !joinedMatch) {
             setOpponentOnline(true);
             setStatus('opponent-found');
+            if (!opponentFoundTracked.current) {
+              opponentFoundTracked.current = true;
+              trackAnalyticsEvent('opponent_found');
+            }
           }
         })
         .subscribe(async (subscriptionStatus) => {
@@ -773,6 +798,10 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('waiting');
           await lobbyChannel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+          if (!queueConnectedTracked.current) {
+            queueConnectedTracked.current = true;
+            trackAnalyticsEvent('queue_connected');
+          }
         }
         if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
           setError('Unable to reach the multiplayer lobby. Check your connection and try again.');
@@ -818,7 +847,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         </div>
       )}
       {!opponentOnline && !hasError && <p className="queue-note">Keep this tab open, or jump into a bot match anytime.</p>}
-      <button className="text-button" onClick={onCancel}>Cancel search</button>
+      <button className="text-button" onClick={() => onCancel({ secondsWaiting, status })}>Cancel search</button>
     </main>
   );
 }
@@ -856,6 +885,7 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
     }
 
     let active = true;
+    let joinedTracked = false;
     setStatus('connecting');
     setError('');
     setChat([]);
@@ -937,6 +967,10 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('ready');
           sendHeartbeat();
+          if (!joinedTracked) {
+            joinedTracked = true;
+            trackAnalyticsEvent('party_joined', { party_size: Math.max(1, getPartyRoster(channel).length) });
+          }
         }
         if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
           setStatus('error');
@@ -1139,9 +1173,11 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
   const [started, setStarted] = useState(Date.now() >= game.startsAt);
   const transitionTimer = useRef(null);
   const resolvedRounds = useRef(new Set());
+  const startedTracked = useRef(false);
   const round = game.rounds[roundIndex];
   const question = game.questions[round.questionIndex];
   const isActive = round.playerId === game.playerId;
+  const ownTeam = game.roster.find((member) => member.playerId === game.playerId)?.team;
   const teamA = game.roster.filter((member) => member.team === 'A');
   const teamB = game.roster.filter((member) => member.team === 'B');
 
@@ -1168,6 +1204,7 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
           opponentScore: finalScores.B,
           teamScores: finalScores,
           winner,
+          outcome: winner === 'TIE' ? 'tie' : winner === ownTeam ? 'win' : 'loss',
           summary: winner === 'TIE' ? 'Team battle tied.' : `Team ${winner} wins the party battle.`,
         });
         return;
@@ -1177,11 +1214,19 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
       setSelected(null);
       setFeedback('');
     }, 950);
-  }, [game.rounds.length, onFinish, round.id, roundIndex, scores]);
+  }, [game.rounds.length, onFinish, ownTeam, round.id, roundIndex, scores]);
 
   useEffect(() => {
     const delay = Math.max(0, game.startsAt - Date.now());
-    const startTimer = setTimeout(() => setStarted(true), delay);
+    const startTimer = setTimeout(() => {
+      setStarted(true);
+      if (!startedTracked.current) {
+        startedTracked.current = true;
+        const properties = { game_id: game.id, attempt_id: `${game.id}:${game.playerId}`, mode: 'party_team', total_rounds: game.rounds.length };
+        trackAnalyticsEvent('party_game_started', { ...properties, game_type: 'team', party_size: game.roster.length });
+        trackAnalyticsEvent('game_started', properties);
+      }
+    }, delay);
     const unsubscribe = game.events.subscribe((event, payload) => {
       if (event === 'answer' || event === 'timeout') resolveRound(payload);
     });
@@ -1222,6 +1267,20 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
 
   useEffect(() => {
     if (time > 0 || selected !== null || resolvedRounds.current.has(round.id)) return;
+    if (isActive) {
+      trackAnalyticsEvent('game_question_answered', {
+        game_id: game.id,
+        attempt_id: `${game.id}:${game.playerId}`,
+        mode: 'party_team',
+        round: roundIndex + 1,
+        total_rounds: game.rounds.length,
+        category: question.category,
+        correct: false,
+        timed_out: true,
+        response_ms: 15000,
+        score: playerScores[game.playerId] || 0,
+      });
+    }
     game.channel.send({
       type: 'broadcast',
       event: 'party-timeout',
@@ -1236,12 +1295,24 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
         timedOut: true,
       },
     });
-  }, [game.channel, round, selected, time]);
+  }, [game.channel, game.id, game.playerId, game.rounds.length, isActive, playerScores, question.category, round, roundIndex, selected, time]);
 
   function choose(index) {
     if (!started || !isActive || selected !== null || resolvedRounds.current.has(round.id)) return;
     const correct = index === question.answer;
     const gain = correct ? 500 + Math.round(time * 45) : 0;
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: game.id,
+      attempt_id: `${game.id}:${game.playerId}`,
+      mode: 'party_team',
+      round: roundIndex + 1,
+      total_rounds: game.rounds.length,
+      category: question.category,
+      correct,
+      timed_out: false,
+      response_ms: Math.max(0, Math.round((15 - time) * 1000)),
+      score: (playerScores[game.playerId] || 0) + gain,
+    });
     game.channel.send({
       type: 'broadcast',
       event: 'party-answer',
@@ -1257,9 +1328,22 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
     });
   }
 
+  function exitGame() {
+    trackAnalyticsEvent('game_abandoned', {
+      game_id: game.id,
+      attempt_id: `${game.id}:${game.playerId}`,
+      mode: 'party_team',
+      round: roundIndex + 1,
+      total_rounds: game.rounds.length,
+      score: playerScores[game.playerId] || 0,
+      reason: 'explicit_exit',
+    });
+    onExit();
+  }
+
   return (
     <main className="game-shell arena party-game">
-      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> PARTY TEAM · ROUND {roundIndex + 1}/{game.rounds.length}</span><button className="icon-button" aria-label="Exit party game" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> PARTY TEAM · ROUND {roundIndex + 1}/{game.rounds.length}</span><button className="icon-button" aria-label="Exit party game" onClick={exitGame}><X /></button></div>
       <div className="party-scoreboard">
         <div><small>TEAM A</small><strong>{scores.A.toLocaleString()}</strong><span>{teamA.map((member) => member.name).join(', ')}</span></div>
         <div className="vs-badge">VS</div>
@@ -1302,6 +1386,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   const transitionTimer = useRef(null);
   const resolvedDuels = useRef(new Set());
   const answersRef = useRef({});
+  const startedTracked = useRef(false);
   const pair = tournament.pairs[tournament.matchIndex] || [];
   // Namespaced by game id: the party channel outlives games, so a late duel
   // broadcast from a previous game must never match this game's duels.
@@ -1371,7 +1456,15 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
 
   useEffect(() => {
     const delay = Math.max(0, game.startsAt - Date.now());
-    const startTimer = setTimeout(() => setStarted(true), delay);
+    const startTimer = setTimeout(() => {
+      setStarted(true);
+      if (!startedTracked.current) {
+        startedTracked.current = true;
+        const properties = { game_id: game.id, attempt_id: `${game.id}:${game.playerId}`, mode: 'party_tournament', total_rounds: game.questions.length };
+        trackAnalyticsEvent('party_game_started', { ...properties, game_type: 'tournament', party_size: game.entrants.length });
+        trackAnalyticsEvent('game_started', properties);
+      }
+    }, delay);
     const unsubscribe = game.events.subscribe((event, payload) => {
       if (event === 'duel-answer' && payload?.duelId === duelId) {
         answersRef.current = { ...answersRef.current, [payload.playerId]: payload };
@@ -1428,9 +1521,24 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
       const byeTimer = setTimeout(() => resolveDuel('bye'), 700);
       return () => clearTimeout(byeTimer);
     }
-    const timeout = setTimeout(() => resolveDuel('timeout'), 15000);
+    const timeout = setTimeout(() => {
+      if (isDuelist && !hasAnswered) {
+        trackAnalyticsEvent('game_question_answered', {
+          game_id: game.id,
+          attempt_id: `${game.id}:${game.playerId}`,
+          mode: 'party_tournament',
+          round: tournament.roundNumber,
+          total_rounds: game.questions.length,
+          category: question.category,
+          correct: false,
+          timed_out: true,
+          response_ms: 15000,
+        });
+      }
+      resolveDuel('timeout');
+    }, 15000);
     return () => clearTimeout(timeout);
-  }, [duelId, pair.length, resolveDuel, started]);
+  }, [duelId, game.id, game.playerId, game.questions.length, hasAnswered, isDuelist, pair.length, question.category, resolveDuel, started, tournament.roundNumber]);
 
   function choose(index) {
     if (!started || !isDuelist || hasAnswered || selected !== null || resolvedDuels.current.has(duelId)) return;
@@ -1438,6 +1546,18 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
     const gain = correct ? 500 + Math.round(time * 45) : 0;
     setSelected(index);
     setFeedback(correct ? `Locked in +${gain}` : 'Locked in — not quite.');
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: game.id,
+      attempt_id: `${game.id}:${game.playerId}`,
+      mode: 'party_tournament',
+      round: tournament.roundNumber,
+      total_rounds: game.questions.length,
+      category: question.category,
+      correct,
+      timed_out: false,
+      response_ms: Math.max(0, Math.round((15 - time) * 1000)),
+      score: gain,
+    });
     game.channel.send({
       type: 'broadcast',
       event: 'party-duel-answer',
@@ -1453,9 +1573,21 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
     });
   }
 
+  function exitGame() {
+    trackAnalyticsEvent('game_abandoned', {
+      game_id: game.id,
+      attempt_id: `${game.id}:${game.playerId}`,
+      mode: 'party_tournament',
+      round: tournament.roundNumber,
+      total_rounds: game.questions.length,
+      reason: 'explicit_exit',
+    });
+    onExit();
+  }
+
   return (
     <main className="game-shell arena party-game">
-      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> TOURNAMENT · ROUND {tournament.roundNumber}</span><button className="icon-button" aria-label="Exit tournament" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> TOURNAMENT · ROUND {tournament.roundNumber}</span><button className="icon-button" aria-label="Exit tournament" onClick={exitGame}><X /></button></div>
       <div className="party-scoreboard tournament-board">
         <div><small>DUELIST</small><strong>{pair[0]?.name || 'TBD'}</strong><span>{duelAnswers[pair[0]?.playerId]?.gain?.toLocaleString?.() || 'Waiting'}</span></div>
         <div className="vs-badge">VS</div>
@@ -1499,9 +1631,15 @@ function Game({ player, match, onFinish, onExit }) {
   const localFinal = useRef(null);
   const remoteFinal = useRef(null);
   const deliveredResult = useRef(false);
+  const startedTracked = useRef(false);
+  const opponentWasConnected = useRef(true);
+  const questionIndexRef = useRef(questionIndex);
+  questionIndexRef.current = questionIndex;
   const opponentScoreRef = useRef(0);
   const question = questions[questionIndex];
   const opponent = match.opponent.name;
+  const gameMode = match.isBot ? 'bot' : 'human';
+  const attemptId = `${match.id}:${match.playerId}`;
 
   useEffect(() => {
     const renderGameState = () => JSON.stringify({
@@ -1525,8 +1663,18 @@ function Game({ player, match, onFinish, onExit }) {
   const deliverResult = useCallback((localScore, remoteScore) => {
     if (deliveredResult.current || localScore === null || remoteScore === null) return;
     deliveredResult.current = true;
+    trackAnalyticsEvent('game_completed', {
+      game_id: match.id,
+      attempt_id: attemptId,
+      mode: gameMode,
+      round: questions.length,
+      total_rounds: questions.length,
+      score: localScore,
+      opponent_score: remoteScore,
+      outcome: localScore >= remoteScore ? 'win' : 'loss',
+    });
     onFinish({ score: localScore, opponentScore: remoteScore });
-  }, [onFinish]);
+  }, [attemptId, gameMode, match.id, onFinish, questions.length]);
 
   const finishLocal = useCallback((finalScore) => {
     if (localFinal.current !== null) return;
@@ -1553,7 +1701,18 @@ function Game({ player, match, onFinish, onExit }) {
 
   useEffect(() => {
     const delay = Math.max(0, match.startsAt - Date.now());
-    const startTimer = setTimeout(() => setStarted(true), delay);
+    const startTimer = setTimeout(() => {
+      setStarted(true);
+      if (!startedTracked.current) {
+        startedTracked.current = true;
+        trackAnalyticsEvent('game_started', {
+          game_id: match.id,
+          attempt_id: attemptId,
+          mode: gameMode,
+          total_rounds: questions.length,
+        });
+      }
+    }, delay);
 
     const unsubscribe = match.events.subscribe((event, payload) => {
       if (event === 'score') {
@@ -1571,7 +1730,17 @@ function Game({ player, match, onFinish, onExit }) {
       }
       if (event === 'presence') {
         const players = payload;
-        setOpponentConnected(players.some((candidate) => candidate.playerId === match.opponent.id));
+        const connected = players.some((candidate) => candidate.playerId === match.opponent.id);
+        if (opponentWasConnected.current && !connected) {
+          trackAnalyticsEvent('opponent_disconnected', {
+            game_id: match.id,
+            attempt_id: attemptId,
+            mode: gameMode,
+            round: questionIndexRef.current + 1,
+          });
+        }
+        opponentWasConnected.current = connected;
+        setOpponentConnected(connected);
       }
       if (event === 'chat') {
         setChatMessages((current) => appendChatMessage(current, payload));
@@ -1598,8 +1767,20 @@ function Game({ player, match, onFinish, onExit }) {
     if (time > 0 || selected !== null) return;
     setSelected(-1);
     setFeedback('Time!');
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: match.id,
+      attempt_id: attemptId,
+      mode: gameMode,
+      round: questionIndex + 1,
+      total_rounds: questions.length,
+      category: question.category,
+      correct: false,
+      timed_out: true,
+      response_ms: 15000,
+      score,
+    });
     transitionTimer.current = setTimeout(() => advance(score), 750);
-  }, [advance, score, selected, time]);
+  }, [advance, attemptId, gameMode, match.id, question.category, questionIndex, questions.length, score, selected, time]);
 
   function choose(index) {
     if (!started || selected !== null || localFinal.current !== null) return;
@@ -1609,12 +1790,39 @@ function Game({ player, match, onFinish, onExit }) {
     const nextScore = score + gain;
     setScore(nextScore);
     setFeedback(correct ? `Correct! +${gain}` : 'Not quite!');
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: match.id,
+      attempt_id: attemptId,
+      mode: gameMode,
+      round: questionIndex + 1,
+      total_rounds: questions.length,
+      category: question.category,
+      correct,
+      timed_out: false,
+      response_ms: Math.max(0, Math.round((15 - time) * 1000)),
+      score: nextScore,
+    });
     match.channel.send({
       type: 'broadcast',
       event: 'score',
       payload: { playerId: match.playerId, score: nextScore, questionIndex },
     });
     transitionTimer.current = setTimeout(() => advance(nextScore), 850);
+  }
+
+  function exitGame() {
+    if (!deliveredResult.current) {
+      trackAnalyticsEvent('game_abandoned', {
+        game_id: match.id,
+        attempt_id: attemptId,
+        mode: gameMode,
+        round: questionIndex + 1,
+        total_rounds: questions.length,
+        score,
+        reason: localFinal.current === null ? 'explicit_exit' : 'left_waiting_for_opponent',
+      });
+    }
+    onExit();
   }
 
   function sendChat(text) {
@@ -1625,7 +1833,7 @@ function Game({ player, match, onFinish, onExit }) {
 
   return (
     <main className="game-shell arena">
-      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{questions.length}</span><button className="icon-button" aria-label="Exit game" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{questions.length}</span><button className="icon-button" aria-label="Exit game" onClick={exitGame}><X /></button></div>
       <div className="scoreboard">
         <div className="game-player"><span className="avatar avatar-you">{player[0].toUpperCase()}</span><div><small>YOU</small><strong>{player}</strong></div><b>{score.toLocaleString()}</b></div>
         <div className="vs-badge">VS</div>
@@ -1704,11 +1912,11 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
   );
 }
 
-function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, accountRank, authNotice, canViewAdmin, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
+      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
       {authNotice && <div className="auth-notice" role="status">{authNotice}<button onClick={onNoticeClose} aria-label="Dismiss"><X size={16} /></button></div>}
       <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
         <span className="leaderboard-fab-icon"><Trophy aria-hidden="true" /></span>
@@ -1799,7 +2007,7 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
 }
 
 export default function App() {
-  const [screen, setScreen] = useState('landing');
+  const [screen, setScreen] = useState(() => window.location.pathname.startsWith('/admin') ? 'admin' : 'landing');
   const [modal, setModal] = useState(null);
   const [player, setPlayer] = useState('');
   const [opponent, setOpponent] = useState('');
@@ -1808,6 +2016,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState('');
+  const [adminAccess, setAdminAccess] = useState(false);
   const [guestDestination, setGuestDestination] = useState('matchmaking');
   const [confirmLeave, setConfirmLeave] = useState(false);
   // `partyCode` is the party you have actually joined/created. A code sitting
@@ -1820,9 +2029,38 @@ export default function App() {
   const partyPlayerId = useRef(createPlayerId());
   const createdPartyCodeRef = useRef('');
   const screenRef = useRef(screen);
+
+  useEffect(() => {
+    return initializeAnalytics('/');
+  }, []);
+
   useEffect(() => {
     screenRef.current = screen;
+    const paths = {
+      landing: '/',
+      matchmaking: '/matchmaking',
+      party: '/party',
+      'party-game': '/party/game',
+      game: '/game',
+      results: '/results',
+    };
+    if (paths[screen]) trackPageView(paths[screen]);
   }, [screen]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (window.location.pathname.startsWith('/admin')) {
+        if (['game', 'matchmaking', 'party-game'].includes(screenRef.current)) {
+          window.history.replaceState(null, '', '/');
+          return;
+        }
+        setScreen('admin');
+      }
+      else if (screenRef.current === 'admin') setScreen('landing');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // The party connection lives here, not in the party screen, so finishing a
   // game or browsing other screens never disconnects anyone from the party.
@@ -1846,6 +2084,7 @@ export default function App() {
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
   const handlePlayBot = useCallback(() => {
     const botMatch = createBotMatch(player);
+    trackAnalyticsEvent('bot_selected', { game_id: botMatch.id, mode: 'bot' });
     setMatch(botMatch);
     setOpponent(botMatch.opponent.name);
     setScreen('game');
@@ -1863,8 +2102,30 @@ export default function App() {
       console.error('Could not persist match result', error);
     }
     setResult({ ...data, matchStats, vsBot: Boolean(match?.isBot) });
+    trackAnalyticsEvent('result_viewed', {
+      game_id: match?.id,
+      mode: match?.isBot ? 'bot' : 'human',
+      score: data.score,
+      opponent_score: data.opponentScore,
+      persisted: match?.isBot || Boolean(matchStats),
+    });
     setScreen('results');
   }, [match?.id, match?.isBot]);
+
+  const handlePartyFinish = useCallback((data) => {
+    const mode = data.type === 'party-tournament' ? 'party_tournament' : 'party_team';
+    trackAnalyticsEvent('game_completed', {
+      game_id: match?.id,
+      attempt_id: `${match?.id}:${match?.playerId}`,
+      mode,
+      score: data.score,
+      opponent_score: data.opponentScore,
+      outcome: data.outcome || (data.score >= data.opponentScore ? 'win' : 'loss'),
+    });
+    trackAnalyticsEvent('result_viewed', { game_id: match?.id, mode, score: data.score, opponent_score: data.opponentScore });
+    setResult(data);
+    setScreen('results');
+  }, [match?.id, match?.playerId]);
 
   useEffect(() => {
     if (screen === 'game' || screen === 'party-game') return undefined;
@@ -1885,6 +2146,10 @@ export default function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       setAuthReady(true);
+      setAnalyticsAccessToken(nextSession?.access_token || '');
+      if (event === 'SIGNED_IN' && !fromConfirmLink.current) {
+        trackAnalyticsEvent('login_succeeded', { status: 'authenticated' });
+      }
       if (event === 'SIGNED_IN' && fromConfirmLink.current) {
         fromConfirmLink.current = false;
         const name = nextSession?.user?.user_metadata?.battle_name
@@ -1896,6 +2161,18 @@ export default function App() {
     });
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    if (!supabase || !session?.user) {
+      setAdminAccess(false);
+      return undefined;
+    }
+    supabase.rpc('analytics_is_admin').then(({ data }) => {
+      if (active) setAdminAccess(Boolean(data));
+    });
+    return () => { active = false; };
+  }, [session?.user?.id]);
 
   const accountName = session?.user?.user_metadata?.battle_name
     || session?.user?.email?.split('@')[0]
@@ -1919,16 +2196,19 @@ export default function App() {
   function createParty() {
     if (!hasRealtimeConfig) return;
     const code = createPartyCode();
+    trackAnalyticsEvent('party_created');
     createdPartyCodeRef.current = code;
     setPartyCode(code);
     window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
   }
   function joinParty(code) {
+    trackAnalyticsEvent('party_join_requested');
     createdPartyCodeRef.current = '';
     setPartyCode(code);
     window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
   }
   function leaveParty() {
+    trackAnalyticsEvent('party_left');
     createdPartyCodeRef.current = '';
     setPartyCode('');
     setConfirmLeave(false);
@@ -1947,31 +2227,56 @@ export default function App() {
     setGuestDestination('matchmaking');
     setModal('guest');
   }
+  function cancelMatchmaking(details = {}) {
+    trackAnalyticsEvent('queue_abandoned', {
+      wait_seconds: Number(details.secondsWaiting) || 0,
+      status: details.status || 'cancelled',
+      reason: 'explicit_cancel',
+    });
+    home();
+  }
+  function openAdmin() {
+    window.history.pushState(null, '', '/admin');
+    setModal(null);
+    setScreen('admin');
+  }
+  function closeAdmin() {
+    window.history.replaceState(null, '', '/');
+    setModal(null);
+    setScreen('landing');
+  }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
-  function home() { setScreen('landing'); setResult(null); setMatch(null); setOpponent(''); }
+  function home() {
+    if (window.location.pathname.startsWith('/admin')) window.history.replaceState(null, '', '/');
+    setScreen('landing');
+    setResult(null);
+    setMatch(null);
+    setOpponent('');
+  }
   async function logout() { await supabase?.auth.signOut(); home(); }
 
   const inParty = Boolean(partyCode && player);
-  const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game';
+  const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game' && screen !== 'admin';
 
   let content;
-  if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={home} />;
+  if (screen === 'admin') content = <AdminDashboard brand={<Logo />} session={session} onBack={closeAdmin} onLogin={() => setModal('login')} onLogout={logout} />;
+  else if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={cancelMatchmaking} />;
   else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;
-  else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
+  else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={handlePartyFinish} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
   else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen('party') : undefined} />;
-  else content = <>
-    <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
-    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
+  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} canViewAdmin={adminAccess} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />;
+
+  const modalContent = modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
       const invite = guestDestination === 'party' ? pendingInvite.current : '';
       pendingInvite.current = '';
       if (invite.length === PARTY_CODE_LENGTH) joinParty(invite);
       start(name, guestDestination);
-    }} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
-  </>;
+    }} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />;
 
   return <>
     {content}
+    {modalContent}
     {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} />}
     {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={() => setConfirmLeave(true)} />}
     {confirmLeave && <ConfirmDialog title="Leave the party?" message="Are you sure you want to leave the party? You'll need the invite link or code to rejoin." confirmLabel="Leave party" onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}

@@ -1,6 +1,38 @@
 name: stemegle
 
 services:
+  migrate:
+    build:
+      context: ${APP_SOURCE_DIR:-.}
+      dockerfile: deploy/migrations/Dockerfile
+    image: stemegle-migrations:latest
+    environment:
+      POSTGRES_URL_NON_POOLING: ${POSTGRES_URL_NON_POOLING:-}
+      POSTGRES_URL: ${POSTGRES_URL:-}
+    profiles:
+      - migration
+
+  analytics:
+    build:
+      context: ${APP_SOURCE_DIR:-.}
+      dockerfile: deploy/analytics/Dockerfile
+    image: stemegle-analytics:latest
+    container_name: stemegle_analytics
+    restart: unless-stopped
+    environment:
+      PORT: 8787
+      SUPABASE_URL: ${VITE_SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      ANALYTICS_COOKIE_SECRET: ${ANALYTICS_COOKIE_SECRET:-}
+    ports:
+      - "127.0.0.1:${STEMEGLE_ANALYTICS_PORT:-8098}:8787"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   app:
     build:
       context: ${APP_SOURCE_DIR:-.}
@@ -14,6 +46,9 @@ services:
     image: stemegle:latest
     container_name: stemegle_app
     restart: unless-stopped
+    depends_on:
+      analytics:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${STEMEGLE_PORT:-8097}:80"
     healthcheck:
@@ -50,6 +85,9 @@ services:
       DEPLOY_SOURCE_DIR: /repo/source
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
       STEMEGLE_PORT: ${STEMEGLE_PORT:-8097}
+      STEMEGLE_ANALYTICS_PORT: ${STEMEGLE_ANALYTICS_PORT:-8098}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      ANALYTICS_COOKIE_SECRET: ${ANALYTICS_COOKIE_SECRET:-}
     volumes:
       - ./:/repo
       - /var/run/docker.sock:/var/run/docker.sock

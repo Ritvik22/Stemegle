@@ -34,12 +34,21 @@ VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
 VITE_SITE_URL=https://stemegle.com
 STEMEGLE_PORT=8097
+STEMEGLE_ANALYTICS_PORT=8098
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+ANALYTICS_COOKIE_SECRET=generate-with-openssl-rand-hex-32
+POSTGRES_URL_NON_POOLING=postgresql://your-direct-connection
 ```
 
-If you need to run migrations or database smoke tests from the server, also add one of:
+`SUPABASE_SERVICE_ROLE_KEY` is a server-only secret used by the private analytics
+container. `ANALYTICS_COOKIE_SECRET` signs HttpOnly visitor/session cookies;
+generate it with `openssl rand -hex 32`. Never prefix either with `VITE_`; Vite
+variables are public browser values.
+
+Automated deploys run migrations before replacing the app, so configure the
+direct Postgres URL above. `POSTGRES_URL` can be used as a fallback:
 
 ```bash
-POSTGRES_URL_NON_POOLING=postgresql://...
 POSTGRES_URL=postgresql://...
 ```
 
@@ -56,30 +65,48 @@ https://www.stemegle.com
 
 Keep local development URLs such as `http://localhost:5173` if you still test locally.
 
-Apply migrations once if the Supabase project does not already have the leaderboard schema:
+Apply migrations before the first analytics rollout. Future webhook deploys run
+this step automatically:
 
 ```bash
 cd /home/gbs/stemegle
-set -a
-. ./.env
-set +a
-npm run db:migrate
+docker compose --profile migration build migrate
+docker compose --profile migration run --rm migrate
 ```
 
 ## Docker App
 
-Deploy the repo contents to `/home/gbs/stemegle`, then build and start the static app:
+Deploy the repo contents to `/home/gbs/stemegle`. The app listens only on
+`127.0.0.1:${STEMEGLE_PORT}` and proxies analytics to
+`127.0.0.1:${STEMEGLE_ANALYTICS_PORT}`. Build, migrate, and start the services:
 
 ```bash
 cd /home/gbs/stemegle
-docker compose up -d --build app
+docker compose --profile migration build migrate analytics app
+docker compose --profile migration run --rm migrate
+docker compose up -d --no-build analytics app
 ```
 
-The app listens only on `127.0.0.1:${STEMEGLE_PORT}`. Check that the selected port is free before starting:
+Check that the selected ports are free before starting:
 
 ```bash
 ss -ltn | grep ':8097' || true
+ss -ltn | grep ':8098' || true
 ```
+
+After applying the analytics migration, grant an admin account in the Supabase
+SQL editor. Replace the email with the account that should see private analytics:
+
+```sql
+insert into public.analytics_admins (user_id)
+select id from auth.users
+where lower(email) = lower('your-admin-email@example.com')
+on conflict (user_id) do nothing;
+```
+
+Keep Cloudflare's **Add visitor location headers** managed transform enabled.
+Stemegle stores country, region, city, and timezone hints, but not IP addresses,
+coordinates, or postal codes. Full details are in `ANALYTICS.md`.
 
 ## Cloudflare Tunnel For A Different Account
 
@@ -126,7 +153,10 @@ Events: Just the push event
 Active: checked
 ```
 
-The webhook service verifies GitHub's `X-Hub-Signature-256`, ignores non-`main` pushes, then clones or updates `ritvik22/stemegle` into `/home/gbs/stemegle/source` and rebuilds only `stemegle_app`.
+The webhook service verifies GitHub's `X-Hub-Signature-256`, ignores non-`main`
+pushes, then clones or updates `ritvik22/stemegle` into
+`/home/gbs/stemegle/source`, runs migrations, and rebuilds the analytics and app
+services.
 
 Start or restart the webhook container:
 
@@ -150,8 +180,14 @@ From this repo on your local machine:
 rsync -az --delete \
   --exclude .git \
   --exclude node_modules \
+  --exclude __pycache__/ \
+  --exclude '*.pyc' \
   --exclude dist \
   --exclude .env \
+  --exclude .cloudflared/ \
+  --exclude cloudflared/ \
+  --exclude source/ \
+  --exclude deploy.log \
   ./ gbs@ssh.astrofsa.org:/home/gbs/stemegle/
 ```
 
@@ -159,7 +195,9 @@ Then SSH into the server and run:
 
 ```bash
 cd /home/gbs/stemegle
-docker compose up -d --build app
+docker compose --profile migration build migrate analytics app
+docker compose --profile migration run --rm migrate
+docker compose up -d --no-build analytics app
 ```
 
 If the tunnel is configured too:
@@ -174,6 +212,11 @@ If the webhook is configured too:
 docker compose --profile autodeploy up -d --build autodeploy
 ```
 
+Rebuild `autodeploy` during this first analytics rollout. After that bootstrap,
+the webhook copies the freshly cloned Compose file, builds the cloned Dockerfiles,
+runs migrations, verifies the analytics health endpoint, and only then replaces
+the app containers.
+
 The older system-Nginx deploy script is still available in `scripts/deploy-debian.sh`, but Docker is the safer default on the current shared server.
 
 ## Verify
@@ -182,6 +225,7 @@ On the server:
 
 ```bash
 curl -I http://127.0.0.1:8097/
+curl -fsS http://127.0.0.1:8098/health
 docker ps --filter name=stemegle
 ```
 

@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "db:migrate": "node --env-file=.env.local scripts/apply-migrations.mjs",
+    "test:analytics": "node --test deploy/analytics/server.test.mjs",
+    "db:migrate": "node scripts/apply-migrations.mjs",
     "smoke:leaderboard": "node --env-file=.env.local scripts/leaderboard-smoke.mjs",
     "check:questions": "node scripts/question-bank-check.mjs",
     "smoke:realtime": "node --env-file=.env.local scripts/realtime-smoke.mjs"

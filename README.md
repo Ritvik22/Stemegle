@@ -45,3 +45,7 @@ Supabase Realtime Presence powers the shared queue and deterministic two-player 
 ## Accounts
 
 Supabase Auth provides persistent email/password accounts. Users can create a password-protected account, confirm their email when required, log in across devices, log out, or continue with session-only guest play. Passwords are submitted directly to Supabase Auth and are never stored by the Stemegle frontend.
+
+## First-party analytics
+
+The protected `/admin` workspace reports page views, distinct visitors, acquisition sources, Cloudflare location hints, devices, signup conversion, and per-account gameplay journeys. Analytics uses a same-origin server so Cloudflare headers and the Supabase service role key never enter browser code. See [ANALYTICS.md](./ANALYTICS.md) for the data policy, admin bootstrap, and deployment steps.

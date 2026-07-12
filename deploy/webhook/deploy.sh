@@ -22,12 +22,15 @@ else
 fi
 
 cd "$DEPLOY_DIR"
+cp "$DEPLOY_SOURCE_DIR/compose.yaml" "$DEPLOY_DIR/compose.yaml"
 export APP_SOURCE_DIR="${APP_SOURCE_DIR:-./source}"
-export APP_DOCKERFILE="${APP_DOCKERFILE:-../Dockerfile}"
-docker compose up -d --build app
+export APP_DOCKERFILE="${APP_DOCKERFILE:-Dockerfile}"
+docker compose --profile migration build migrate analytics app
+docker compose --profile migration run --rm migrate
+docker compose up -d --no-build analytics app
 
 for attempt in {1..30}; do
-  if curl -fsSI "http://app/" >/dev/null; then
+  if curl -fsSI "http://app/" >/dev/null && curl -fsS "http://analytics:8787/health" >/dev/null; then
     echo "Stemegle is healthy on the app service"
     exit 0
   fi
