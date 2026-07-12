@@ -1,242 +1,213 @@
-# Debian + Cloudflare Tunnel Deployment
+# Stemegle Self-Hosted Deployment
 
-Stemegle is a Vite React single-page app. Vercel is only serving static files and rewriting browser routes to `index.html`, so a Debian server can host it as static files behind Cloudflare Tunnel.
+This branch runs the web app, API, authentication, realtime relay, PostgreSQL,
+migrations, and verified backups on one Docker host. Cloudflare Tunnel is the
+only public ingress; the web, API, and database host ports bind to loopback.
 
-On a shared server that already runs other websites, prefer the Docker Compose setup in this repo. It creates isolated `stemegle_app` and `stemegle_tunnel` containers and does not modify the other Cloudflare tunnels.
+## Requirements
 
-## What Must Move To The Server
+- Docker Engine with Compose v2+
+- A Cloudflare Tunnel for `stemegle.com`
+- DNS/redirect coverage for `www.stemegle.com`
+- A server checkout with a mode-600 `.env`
 
-Transfer the source code, `package-lock.json`, `supabase/migrations`, and the deployment files in this repo. Do not transfer `node_modules`, `dist`, `.git`, or local `.env` files. Build on the server so the final bundle is created with the production domain and Supabase settings.
+No external auth or database account is required.
 
-The included Docker setup builds the Vite app into an Nginx image and exposes it on a configurable loopback port, defaulting to `127.0.0.1:8097`.
+## Environment
 
-## Server Prerequisites
-
-Install these on Debian if they are not already present:
+Start from `.env.example`:
 
 ```bash
-sudo apt update
-sudo apt install -y docker.io docker-compose-plugin rsync curl ca-certificates
+cp .env.example .env
+chmod 600 .env
+openssl rand -hex 32
 ```
 
-Create the deployment directory. On the current shared server this is `/home/gbs/stemegle`, which avoids sudo and matches the existing Docker project layout:
+Generate a different random value for every secret:
 
-```bash
-mkdir -p /home/gbs/stemegle
-```
+```dotenv
+BETTER_AUTH_URL=https://stemegle.com
+APP_ALLOWED_ORIGINS=https://www.stemegle.com
 
-## Production Environment
+POSTGRES_DB=stemegle
+POSTGRES_USER=stemegle_admin
+POSTGRES_PASSWORD=generated-url-safe-hex
+APP_DATABASE_PASSWORD=generated-independent-hex
+BETTER_AUTH_SECRET=generated-independent-hex
+ANALYTICS_COOKIE_SECRET=generated-independent-hex
 
-Create `/home/gbs/stemegle/.env` on the server:
-
-```bash
-VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
-VITE_SITE_URL=https://stemegle.com
+STEMEGLE_IMAGE_PREFIX=stemegle
 STEMEGLE_PORT=8097
-STEMEGLE_ANALYTICS_PORT=8098
-SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
-ANALYTICS_COOKIE_SECRET=generate-with-openssl-rand-hex-32
-POSTGRES_URL_NON_POOLING=postgresql://your-direct-connection
+STEMEGLE_BACKEND_PORT=8787
+POSTGRES_PORT=5432
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` is a server-only secret used by the private analytics
-container. `ANALYTICS_COOKIE_SECRET` signs HttpOnly visitor/session cookies;
-generate it with `openssl rand -hex 32`. Never prefix either with `VITE_`; Vite
-variables are public browser values.
+`BETTER_AUTH_URL` is the canonical public origin. `APP_ALLOWED_ORIGINS` is a
+comma-separated exact-origin allowlist shared by auth CSRF checks and the
+WebSocket upgrade handler. Never prefix a secret with `VITE_` or commit `.env`.
 
-Automated deploys run migrations before replacing the app, so configure the
-direct Postgres URL above. `POSTGRES_URL` can be used as a fallback:
+## Initial Start
+
+Validate and build the stack:
 
 ```bash
-POSTGRES_URL=postgresql://...
+docker compose config --quiet
+docker compose build migrate backend backup app
+docker compose up -d --wait db
+docker compose up -d --wait backend backup app
 ```
 
-The Supabase URL and anon key are public browser values and are baked into the static build. The Postgres URL is secret and should stay only on the server.
-
-## Supabase Checks
-
-In Supabase Auth settings, add your production site URL and redirect URLs:
-
-```text
-https://stemegle.com
-https://www.stemegle.com
-```
-
-Keep local development URLs such as `http://localhost:5173` if you still test locally.
-
-Apply migrations before the first analytics rollout. Future webhook deploys run
-this step automatically:
+The backend waits for the ordered SQL migrations to finish. Verify it through
+both the private API port and the Nginx proxy:
 
 ```bash
-cd /home/gbs/stemegle
-docker compose --profile migration build migrate
-docker compose --profile migration run --rm migrate
+curl -fsS http://127.0.0.1:8787/health
+curl -fsS http://127.0.0.1:8097/api/stats
+STEMEGLE_URL=http://127.0.0.1:8097 \
+STEMEGLE_BACKEND_URL=http://127.0.0.1:8787 \
+npm run smoke:leaderboard
+STEMEGLE_URL=http://127.0.0.1:8097 npm run smoke:realtime
 ```
 
-## Docker App
-
-Deploy the repo contents to `/home/gbs/stemegle`. The app listens only on
-`127.0.0.1:${STEMEGLE_PORT}` and proxies analytics to
-`127.0.0.1:${STEMEGLE_ANALYTICS_PORT}`. Build, migrate, and start the services:
-
-```bash
-cd /home/gbs/stemegle
-docker compose --profile migration build migrate analytics app
-docker compose --profile migration run --rm migrate
-docker compose up -d --no-build analytics app
-```
-
-Check that the selected ports are free before starting:
-
-```bash
-ss -ltn | grep ':8097' || true
-ss -ltn | grep ':8098' || true
-```
-
-After applying the analytics migration, grant an admin account in the Supabase
-SQL editor. Replace the email with the account that should see private analytics:
-
-```sql
-insert into public.analytics_admins (user_id)
-select id from auth.users
-where lower(email) = lower('your-admin-email@example.com')
-on conflict (user_id) do nothing;
-```
-
-Keep Cloudflare's **Add visitor location headers** managed transform enabled.
-Stemegle stores country, region, city, and timezone hints, but not IP addresses,
-coordinates, or postal codes. Full details are in `ANALYTICS.md`.
-
-## Cloudflare Tunnel For A Different Account
-
-Because the server already has other Cloudflare tunnels for other accounts, keep Stemegle's credentials in `/home/gbs/stemegle/cloudflared` and use a separate `stemegle_tunnel` container.
-
-For a locally managed tunnel:
-
-```bash
-cd /home/gbs/stemegle
-mkdir -p cloudflared
-cloudflared tunnel login --origincert ./cloudflared/cert.pem
-cloudflared tunnel --origincert ./cloudflared/cert.pem create stemegle
-cloudflared tunnel --origincert ./cloudflared/cert.pem route dns stemegle stemegle.com
-cloudflared tunnel --origincert ./cloudflared/cert.pem route dns stemegle www.stemegle.com
-```
-
-Then copy `deploy/cloudflared-config.example.yml` to `cloudflared/config.yml` and replace `YOUR_TUNNEL_ID_OR_NAME` and `YOUR_TUNNEL_ID.json` with the tunnel ID printed by `cloudflared tunnel create`.
-
-Start the tunnel:
+Before enabling the tunnel, provision `cloudflared/config.yml` plus its
+mode-600 tunnel credential JSON. The config's ingress for both public hostnames
+must target `http://app:80`, followed by Cloudflare's required 404 fallback.
+Then enable the `tunnel` profile if this checkout owns the Cloudflare Tunnel:
 
 ```bash
 docker compose --profile tunnel up -d tunnel
 ```
 
-Alternatively, create a remotely managed tunnel in the Cloudflare dashboard for the account that owns `stemegle.com`, then run a separate token-based cloudflared container. Do not reuse the other sites' existing Cloudflare credentials.
+The tunnel ingress remains `http://app:80`; Nginx proxies `/api/*` and WebSocket
+upgrades to `backend:8787` on the private Compose network.
 
-## GitHub Webhook Auto-Deploy
+## Legacy Public Import
 
-The server can auto-deploy when GitHub receives a push to `main`.
-
-The webhook endpoint is:
-
-```text
-https://deploy.stemegle.com/github
-```
-
-In GitHub, open the repo settings and add a webhook:
-
-```text
-Payload URL: https://deploy.stemegle.com/github
-Content type: application/json
-Secret: use the GITHUB_WEBHOOK_SECRET value from /home/gbs/stemegle/.env
-Events: Just the push event
-Active: checked
-```
-
-The webhook service verifies GitHub's `X-Hub-Signature-256`, ignores non-`main`
-pushes, then clones or updates `ritvik22/stemegle` into
-`/home/gbs/stemegle/source`, runs migrations, and rebuilds the analytics and app
-services.
-
-Start or restart the webhook container:
+The one-time export directory must contain `profiles.json` and `matches.json`.
+It must not contain emails, password hashes, tokens, or any private auth data.
+Import it idempotently after migrations:
 
 ```bash
-cd /home/gbs/stemegle
+docker compose run --rm \
+  -v /secure/path/legacy-export:/legacy:ro \
+  -e LEGACY_EXPORT_DIR=/legacy \
+  migrate node scripts/import-legacy-public.mjs
+```
+
+The import keeps historical ranks as visibly separate, unclaimed legacy rows.
+Do not attach them to a new account by battle name because names are not an
+identity proof.
+
+## Backups
+
+The `backup` service runs immediately and then daily. Each PostgreSQL custom
+archive is:
+
+1. Written with owner/ACL metadata removed.
+2. Parsed with `pg_restore --list`.
+3. Fully restored into a scratch database.
+4. Checksummed only after the restore succeeds.
+5. Retained for 30 days by default.
+
+Trigger an extra verified backup before manual maintenance:
+
+```bash
+docker compose --profile maintenance run --rm backup-once
+docker compose exec backup ls -lh /backups
+```
+
+The archives live in the project-scoped `postgres_backups` volume. Replicate
+that volume off-host for machine-loss recovery; a local-only backup is not a
+complete disaster-recovery plan.
+
+Test a restore without replacing production:
+
+```bash
+RESTORE_DATABASE=stemegle_restore_test \
+RESTORE_CONFIRM=restore:stemegle_restore_test \
+docker compose --profile restore run --rm restore \
+  /backups/stemegle_TIMESTAMP.dump stemegle_restore_test
+```
+
+Replacing the live database is intentionally gated and creates another safety
+backup first:
+
+```bash
+docker compose stop app backend backup
+RESTORE_DATABASE=stemegle \
+RESTORE_CONFIRM=restore:stemegle \
+docker compose --profile restore run --rm restore \
+  /backups/stemegle_TIMESTAMP.dump stemegle
+docker compose run --rm migrate
+docker compose up -d --wait backend backup app
+```
+
+The fresh migration run is required: an older archive also contains its older
+`stemegle_schema_migrations` ledger, so restoring data and skipping migrations
+can start new application code against an old schema.
+
+## Automatic Deploys
+
+The webhook service checks out `DEPLOY_BRANCH`, validates Compose, runs tests,
+checks all 5,624 questions, performs a production frontend build, builds the new
+images, starts PostgreSQL, creates a verified pre-migration backup, applies
+migrations, and only then replaces the backend and app containers. It captures
+the image IDs of the running services and restores them if any replacement or
+end-to-end health check fails.
+
+```dotenv
+DEPLOY_REPO=Ritvik22/Stemegle
+DEPLOY_BRANCH=codex/self-hosted-backend
+GITHUB_WEBHOOK_SECRET=generated-webhook-secret
+```
+
+Start it with:
+
+```bash
 docker compose --profile autodeploy up -d --build autodeploy
 ```
 
-Check logs:
+Change `DEPLOY_BRANCH` only after the intended branch is pushed and its staging
+stack passes the smoke tests.
+
+## Isolated Staging
+
+Compose has no fixed container names, so a second project can run beside the
+live stack with alternate loopback ports and its own volumes:
 
 ```bash
-tail -f /home/gbs/stemegle/deploy.log
-docker logs -f stemegle_autodeploy
+COMPOSE_PROJECT_NAME=stemegle-staging \
+STEMEGLE_IMAGE_PREFIX=stemegle-staging \
+STEMEGLE_PORT=18097 \
+STEMEGLE_BACKEND_PORT=18787 \
+POSTGRES_PORT=55432 \
+BETTER_AUTH_URL=http://127.0.0.1:18097 \
+APP_ALLOWED_ORIGINS=http://localhost:18097 \
+docker compose up -d --build --wait backend backup app
 ```
 
-## Deploy From Your Machine
+Never point staging at the production `postgres_data` volume.
+The distinct image prefix is also required: without it, a staging build can
+retag production's rollback images even when the containers and volumes are
+otherwise isolated.
 
-From this repo on your local machine:
+## Cloudflare Analytics Headers
 
-```bash
-rsync -az --delete \
-  --exclude .git \
-  --exclude node_modules \
-  --exclude __pycache__/ \
-  --exclude '*.pyc' \
-  --exclude dist \
-  --exclude .env \
-  --exclude .cloudflared/ \
-  --exclude cloudflared/ \
-  --exclude source/ \
-  --exclude deploy.log \
-  ./ gbs@ssh.astrofsa.org:/home/gbs/stemegle/
-```
+Enable Cloudflare's **Add visitor location headers** managed transform. The API
+accepts country, region, city, and timezone only. It does not store request IPs.
 
-Then SSH into the server and run:
+## Account Migration Boundary
 
-```bash
-cd /home/gbs/stemegle
-docker compose --profile migration build migrate analytics app
-docker compose --profile migration run --rm migrate
-docker compose up -d --no-build analytics app
-```
+Without private access to the previous auth database, emails, password hashes,
+sessions, confirmations, private match results, and private analytics cannot be
+exported. The self-hosted branch therefore requires fresh account passwords.
+This is preferable to guessing identity from public names or retaining a hidden
+dependency on the old provider.
 
-If the tunnel is configured too:
+## Password Recovery
 
-```bash
-docker compose --profile tunnel up -d
-```
-
-If the webhook is configured too:
-
-```bash
-docker compose --profile autodeploy up -d --build autodeploy
-```
-
-Rebuild `autodeploy` during this first analytics rollout. After that bootstrap,
-the webhook copies the freshly cloned Compose file, builds the cloned Dockerfiles,
-runs migrations, verifies the analytics health endpoint, and only then replaces
-the app containers.
-
-The older system-Nginx deploy script is still available in `scripts/deploy-debian.sh`, but Docker is the safer default on the current shared server.
-
-## Verify
-
-On the server:
-
-```bash
-curl -I http://127.0.0.1:8097/
-curl -fsS http://127.0.0.1:8098/health
-docker ps --filter name=stemegle
-```
-
-From anywhere:
-
-```bash
-curl -I https://stemegle.com/
-```
-
-Also create a Supabase account and confirm the email redirect returns to `https://stemegle.com`, not the old Vercel URL.
-
-## Non-Docker Static Alternative
-
-If you later want to use system Nginx instead of Docker, `deploy/nginx-stemegle.conf` and `scripts/deploy-debian.sh` provide that path. Use a loopback port that does not collide with other services.
+Self-service reset email is intentionally disabled until an SMTP or transactional
+mail credential is configured. Better Auth will not log or expose reset links as
+a fallback. Account creation and sign-in work, but a forgotten password currently
+requires an operator-assisted recovery; add a real mailer before inviting a broad
+public account cohort.

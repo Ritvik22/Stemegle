@@ -81,7 +81,6 @@ const attribution = privacyOptOut || directAdminVisit ? {
 let initialized = false;
 let currentPath = '';
 let deliveryQueue = Promise.resolve();
-let accessToken = '';
 
 function virtualPath(path) {
   if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) return '/';
@@ -130,7 +129,6 @@ function deliver(body, keepalive) {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
     },
     credentials: 'same-origin',
     keepalive: Boolean(keepalive),
@@ -142,35 +140,6 @@ function deliver(body, keepalive) {
   }).catch(() => {
     // Telemetry is best effort and must never surface as a product error.
   });
-}
-
-export function setAnalyticsAccessToken(token) {
-  accessToken = typeof token === 'string' ? token : '';
-}
-
-export async function getAnalyticsSignupToken() {
-  if (privacyOptOut || window.location.pathname.startsWith('/admin')) return '';
-  const acquireToken = async () => {
-    await deliveryQueue.catch(() => {});
-    try {
-      const response = await fetch('/api/analytics/signup-token', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
-        },
-        credentials: 'same-origin',
-        body: '{}',
-      });
-      if (!response.ok) return '';
-      const data = await response.json();
-      return typeof data.token === 'string' ? data.token : '';
-    } catch {
-      return '';
-    }
-  };
-  const deadline = new Promise((resolve) => setTimeout(() => resolve(''), 1200));
-  return Promise.race([acquireToken(), deadline]);
 }
 
 export function trackAnalyticsEvent(eventName, properties = {}, options = {}) {

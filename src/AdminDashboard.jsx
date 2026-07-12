@@ -25,7 +25,7 @@ import {
   XCircle,
   Zap,
 } from 'lucide-react';
-import { supabase } from './lib/supabase';
+import { fetchAdminAccess, fetchAdminDashboard } from './lib/api';
 
 const RANGE_OPTIONS = [7, 30, 90, 365];
 const STAGE_OPTIONS = [
@@ -194,7 +194,6 @@ function demoData(days) {
     campaign: entry[2] === 'Google' ? 'summer-stem' : null, landing_path: '/', last_path: entry[9] === 'signed_up' ? '/' : '/game',
     last_event: entry[9] === 'completed' ? 'game_completed' : entry[9] === 'abandoned' ? 'game_abandoned' : 'page_view',
     created_at: new Date(now - (index + 1) * 86400000 * 3).toISOString(),
-    email_confirmed_at: new Date(now - (index + 1) * 86400000 * 2.9).toISOString(),
     last_sign_in_at: new Date(now - index * 86400000).toISOString(),
     first_seen_at: new Date(now - (index + 1) * 86400000 * 3).toISOString(),
     last_seen_at: new Date(now - index * 3600000 * 4).toISOString(),
@@ -224,7 +223,7 @@ function demoData(days) {
   };
 }
 
-export default function AdminDashboard({ brand, session, onBack, onLogin, onLogout }) {
+export default function AdminDashboard({ brand, session, authPending = false, onBack, onLogin, onLogout }) {
   const [days, setDays] = useState(30);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -247,38 +246,43 @@ export default function AdminDashboard({ brand, session, onBack, onLogin, onLogo
         setLoading(false);
         return;
       }
-      if (!session || !supabase) {
+      if (authPending) {
+        setData(null);
+        return;
+      }
+      if (!session) {
         setData(null);
         setLoading(false);
         return;
       }
-      const { data: allowed, error: accessError } = await supabase.rpc('analytics_is_admin');
-      if (!active) return;
-      if (accessError) {
-        setError('Admin access could not be verified. Check the analytics migration and Supabase connection, then refresh.');
-        setData(null);
-        setLoading(false);
-        return;
-      }
-      if (!allowed) {
-        setDenied(true);
-        setData(null);
-        setLoading(false);
-        return;
-      }
-      const { data: dashboard, error: dashboardError } = await supabase.rpc('analytics_admin_dashboard', { p_days: days });
-      if (!active) return;
-      if (dashboardError) {
-        setError('The analytics database is not ready yet. Apply the analytics migration, then refresh.');
-        setData(null);
-      } else {
+      try {
+        const allowed = await fetchAdminAccess();
+        if (!active) return;
+        if (!allowed) {
+          setDenied(true);
+          setData(null);
+          return;
+        }
+        const dashboard = await fetchAdminDashboard(days);
+        if (!active) return;
         setData(dashboard);
+      } catch (loadError) {
+        if (!active) return;
+        setData(null);
+        if (loadError?.status === 403) {
+          setDenied(true);
+        } else if (loadError?.status === 401) {
+          setError('Your session expired. Sign out, then log in again to reopen analytics.');
+        } else {
+          setError('Analytics could not be loaded. Check the application backend and database, then refresh.');
+        }
+      } finally {
+        if (active) setLoading(false);
       }
-      setLoading(false);
     }
     load();
     return () => { active = false; };
-  }, [days, demo, refreshKey, session]);
+  }, [authPending, days, demo, refreshKey, session?.user?.id]);
 
   const users = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -290,7 +294,7 @@ export default function AdminDashboard({ brand, session, onBack, onLogin, onLogo
     });
   }, [data?.users, query, stage]);
 
-  if (!demo && (!session || denied || error)) {
+  if (!demo && !authPending && (!session || denied || error)) {
     return <AccessGate brand={brand} session={session} denied={denied} error={error} onBack={onBack} onLogin={onLogin} onLogout={onLogout} />;
   }
 
@@ -417,7 +421,7 @@ export default function AdminDashboard({ brand, session, onBack, onLogin, onLogo
                     <Fragment key={user.user_id}>
                       <tr>
                         <td><span className="user-avatar">{(user.battle_name || user.email || '?')[0].toUpperCase()}</span><span className="user-identity"><strong>{user.battle_name || 'Unnamed player'}</strong><small>{user.email}</small></span></td>
-                        <td><strong>{formatDate(user.created_at)}</strong><small>{user.email_confirmed_at ? 'Email confirmed' : 'Confirmation pending'}</small></td>
+                        <td><strong>{formatDate(user.created_at)}</strong><small>Account active</small></td>
                         <td><span className="source-wrap"><button type="button" className="source-pill" title={user.referrer_url || 'No external referrer recorded'} aria-describedby={`referrer-${user.user_id}`} onClick={() => setExpandedUser(expanded ? null : user.user_id)}>{user.referral_source || 'Unknown'}</button><span className="referrer-tooltip" role="tooltip" id={`referrer-${user.user_id}`}>{user.referrer_url || 'No external referrer recorded'}</span></span><small>{user.campaign ? `Campaign: ${user.campaign}` : user.landing_path || 'Landing unknown'}</small></td>
                         <td><strong>{location}</strong><small>{user.timezone || 'Timezone unknown'}</small></td>
                         <td><strong>{device}</strong><small>{user.operating_system || 'OS unknown'}</small></td>

@@ -1,97 +1,91 @@
 # Stemegle Analytics
 
-Stemegle now includes first-party traffic and product analytics at `/admin`.
-It records acquisition, coarse Cloudflare geography, device families, account
-conversion, matchmaking, and game journeys for bot, human, team, and tournament
-play.
+The authenticated `/admin` workspace reports traffic, acquisition, conversion,
+and player progress from Stemegle's own PostgreSQL database.
 
-## What Is Collected
+## Dashboard
 
-- Signed, HttpOnly anonymous visitor cookie (180 days) and 30-minute idle session cookie
-- Virtual page views for landing, matchmaking, party, game, and results screens
-- Sanitized external referrer, UTM source/medium/campaign/term/content, and landing path
+The dashboard includes:
+
+- Page views, distinct visitors, sessions, signups, and unconverted visitors
+- Daily traffic, game starts, completions, and abandonments
+- Referrer source, exact sanitized referrer URL, UTM fields, and landing page
+- Cloudflare country, region, city, and timezone hints
+- Device type, browser family, and operating system
+- Bot, human, team, and tournament completion breakdowns
+- A signup-to-completion funnel
+- Signed-up users with first touch, latest activity, account activity, gameplay
+  stage, ranked record, and whether a started game was completed or abandoned
+
+## Collection Policy
+
+Stemegle records:
+
+- A signed HttpOnly visitor cookie lasting 180 days
+- A signed HttpOnly 30-minute activity-session cookie
+- Virtual page views for landing, matchmaking, party, game, and result screens
+- Sanitized external referrer and UTM source/medium/campaign/term/content
 - Cloudflare country, region, city, and timezone headers
 - Coarse device type, browser family, and operating system
-- Signup, queue, game start, question progress, completion, and abandonment events
-- Anonymous-to-account attribution after signup or login
+- Signup, queue, game start, question progress, completion, and abandonment
+- Anonymous-to-account attribution once the user authenticates
 
-Stemegle does not persist IP addresses, raw user-agent strings, passwords, auth
-tokens, party codes, chat messages, question/answer text, latitude/longitude, or
-postal codes. Sensitive referrer query fields and all fragments are removed
-before storage. Browsers that enable Do Not Track or Global Privacy Control are
-not tracked. Raw events, sessions, and inactive visitor records are automatically
-removed after 400 days.
+Party analytics use an opaque per-game identifier; invite codes never enter the
+analytics payload.
+
+The analytics tables do **not** store IP addresses, raw user-agent strings,
+passwords, session tokens, party codes, chat messages, question text, answer
+text, latitude/longitude, or postal codes. Referrer fragments, credentials, and
+non-allowlisted query parameters are removed before storage. Browsers with Do
+Not Track or Global Privacy Control enabled are not tracked. Admin page visits
+are also excluded.
+
+Better Auth separately stores a signed-in session's token, IP address, and raw
+user agent as security metadata. Plaintext passwords are never stored; Better
+Auth stores a password hash. Expired auth sessions and their metadata are
+purged by the daily maintenance job.
+
+Raw events, sessions, and inactive anonymous visitors are removed after 400
+days by default. Set `ANALYTICS_RETENTION_DAYS` between 30 and 730 to change the
+window.
 
 ## Data Flow
 
-The browser posts an allowlisted event to `POST /api/analytics/events`. Nginx
-proxies that request to the private `analytics` container. The service reads the
-Cloudflare headers attached to that request, normalizes the user agent, removes
-sensitive fields, rate limits the sender in memory, and calls a service-role-only
-Supabase RPC. Visitor and session IDs are issued and signed by the service rather
-than trusted from JavaScript. Signed-in events are linked only after the service
-verifies the Supabase access token. Email-confirmation signups use a one-time,
-30-minute attribution token consumed by the auth trigger. Server secrets never
-enter the Vite bundle.
+The browser sends an allowlisted event to `POST /api/analytics/events`. Nginx
+proxies it to the private Express backend, which:
 
-Analytics tables have RLS enabled and grant no browser read access. Admin data is
-returned only by an authenticated RPC that checks `analytics_admins` (or a trusted
-`app_metadata.role = admin` claim) inside Postgres.
+1. Rejects cross-origin and oversized requests.
+2. Rate limits the source without persisting its IP address.
+3. Reads Cloudflare location headers and normalizes the user agent.
+4. Issues signed visitor/session cookies instead of trusting browser IDs.
+5. Verifies Better Auth sessions server-side before attaching a user ID.
+6. Writes a parameterized, idempotent PostgreSQL transaction.
 
-## Setup
+The admin endpoints verify the same HttpOnly session and require
+`app_users.role = 'admin'`. No database or admin secret enters the Vite bundle.
 
-1. Add the server-only values to the production `.env`:
+## Admin Bootstrap
 
-   ```text
-   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-   ANALYTICS_COOKIE_SECRET=generate-with-openssl-rand-hex-32
-   POSTGRES_URL_NON_POOLING=your-direct-postgres-url
-   ```
+Create the intended account normally, then assign its role from the trusted
+server console and sign in again afterward:
 
-   Generate the cookie secret with `openssl rand -hex 32`. Never prefix these
-   secrets with `VITE_` and never commit their values.
-
-2. Apply all migrations:
-
-   ```bash
-   docker compose --profile migration build migrate
-   docker compose --profile migration run --rm migrate
-   ```
-
-3. Grant an existing Stemegle account access in the Supabase SQL editor:
-
-   ```sql
-   insert into public.analytics_admins (user_id)
-   select id
-   from auth.users
-   where lower(email) = lower('your-admin-email@example.com')
-   on conflict (user_id) do nothing;
-   ```
-
-4. Rebuild both production services:
-
-   ```bash
-   docker compose up -d --build analytics app
-   ```
-
-5. Sign in with the granted account and open `https://stemegle.com/admin`.
-
-Cloudflare's **Add visitor location headers** managed transform must remain
-enabled. The analytics service accepts only the country, region, city, and
-timezone subset. Historical referral, device, and geography data cannot be
-backfilled; existing accounts appear as `Unknown (pre-tracking)` until they
-return.
-
-## Local Verification
-
-The UI has a development-only preview populated with representative data:
-
-```text
-http://localhost:5173/admin?analytics-demo=1
+```sql
+update app_users
+set role = 'admin', updated_at = now()
+where lower(email) = lower('you@example.com');
 ```
 
-The flag is unavailable in production builds. Run the API unit checks with:
+Never grant access through an unverified email allowlist: before an address is
+verified, another person could register it first. The database role is the
+authorization boundary; hiding the navigation link is not.
 
-```bash
-npm run test:analytics
-```
+## Cloudflare
+
+Keep Cloudflare's **Add visitor location headers** managed transform enabled.
+Only country, region, city, and timezone are accepted. Missing headers render as
+unknown rather than blocking the event.
+
+Historical acquisition and private account data cannot be backfilled without
+private access to the former database. New activity is tracked from the moment
+this stack is deployed; imported public leaderboard rows stay separate from
+new authenticated accounts.

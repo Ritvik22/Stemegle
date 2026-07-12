@@ -9,3 +9,8 @@ __pycache__/
 .vercel
 .env*
 !.env.example
+/backups/
+/source/
+deploy.log
+*.dump
+*.dump.sha256

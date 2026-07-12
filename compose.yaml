@@ -1,53 +1,187 @@
 name: stemegle
 
+x-database-url: &database-url
+  DATABASE_URL: "postgresql://stemegle_app:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@db:5432/${POSTGRES_DB:-stemegle}"
+
+x-migration-database: &migration-database
+  MIGRATION_DATABASE_URL: "postgresql://${POSTGRES_USER:-stemegle_admin}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-stemegle}"
+  DATABASE_URL: "postgresql://stemegle_app:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@db:5432/${POSTGRES_DB:-stemegle}"
+  APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}
+
+x-postgres-client: &postgres-client
+  PGHOST: db
+  PGPORT: "5432"
+  PGDATABASE: ${POSTGRES_DB:-stemegle}
+  PGUSER: ${POSTGRES_USER:-stemegle_admin}
+  PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+  PGCONNECT_TIMEOUT: "10"
+
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    stop_grace_period: 1m
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stemegle}
+      POSTGRES_USER: ${POSTGRES_USER:-stemegle_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   migrate:
     build:
       context: ${APP_SOURCE_DIR:-.}
       dockerfile: deploy/migrations/Dockerfile
-    image: stemegle-migrations:latest
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-migrations:latest
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
-      POSTGRES_URL_NON_POOLING: ${POSTGRES_URL_NON_POOLING:-}
-      POSTGRES_URL: ${POSTGRES_URL:-}
-    profiles:
-      - migration
+      <<: *migration-database
 
-  analytics:
+  validate:
     build:
       context: ${APP_SOURCE_DIR:-.}
-      dockerfile: deploy/analytics/Dockerfile
-    image: stemegle-analytics:latest
-    container_name: stemegle_analytics
+      dockerfile: deploy/validation/Dockerfile
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-validation:latest
+    restart: "no"
+    profiles:
+      - validation
+
+  backend:
+    build:
+      context: ${APP_SOURCE_DIR:-.}
+      dockerfile: deploy/backend/Dockerfile
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-backend:latest
     restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
-      PORT: 8787
-      SUPABASE_URL: ${VITE_SUPABASE_URL}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
-      ANALYTICS_COOKIE_SECRET: ${ANALYTICS_COOKIE_SECRET:-}
+      <<: *database-url
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8787"
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?Set BETTER_AUTH_URL in .env}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env}
+      ANALYTICS_COOKIE_SECRET: ${ANALYTICS_COOKIE_SECRET:?Set ANALYTICS_COOKIE_SECRET in .env}
+      APP_ALLOWED_ORIGINS: ${APP_ALLOWED_ORIGINS:-}
+      ANALYTICS_RETENTION_DAYS: ${ANALYTICS_RETENTION_DAYS:-400}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-12}
+    expose:
+      - "8787"
     ports:
-      - "127.0.0.1:${STEMEGLE_ANALYTICS_PORT:-8098}:8787"
+      - "127.0.0.1:${STEMEGLE_BACKEND_PORT:-8787}:8787"
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8787/health"]
-      interval: 30s
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 5s
+      retries: 8
+      start_period: 15s
+
+  backup:
+    build:
+      context: ${APP_SOURCE_DIR:-.}
+      dockerfile: deploy/postgres/Dockerfile
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-postgres-tools:latest
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 1m
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *postgres-client
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-900}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-172800}
+      BACKUP_VERIFY_DATABASE: ${BACKUP_VERIFY_DATABASE:-stemegle_backup_verify}
+    volumes:
+      - postgres_backups:/backups
+    entrypoint: ["/usr/local/bin/stemegle-backup-loop"]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/stemegle-backup-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+
+  backup-once:
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-postgres-tools:latest
+    pull_policy: never
+    restart: "no"
+    init: true
+    profiles:
+      - maintenance
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *postgres-client
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_VERIFY_DATABASE: ${BACKUP_VERIFY_DATABASE:-stemegle_backup_verify}
+    volumes:
+      - postgres_backups:/backups
+    entrypoint: ["/usr/local/bin/stemegle-backup"]
+    security_opt:
+      - no-new-privileges:true
+
+  restore:
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-postgres-tools:latest
+    pull_policy: never
+    restart: "no"
+    init: true
+    profiles:
+      - restore
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *postgres-client
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_VERIFY_DATABASE: ${BACKUP_VERIFY_DATABASE:-stemegle_backup_verify}
+      RESTORE_DATABASE: ${RESTORE_DATABASE:-}
+      RESTORE_CONFIRM: ${RESTORE_CONFIRM:-}
+      RESTORE_SKIP_SAFETY_BACKUP: ${RESTORE_SKIP_SAFETY_BACKUP:-0}
+    volumes:
+      - postgres_backups:/backups
+    entrypoint: ["/usr/local/bin/stemegle-restore"]
+    security_opt:
+      - no-new-privileges:true
 
   app:
     build:
       context: ${APP_SOURCE_DIR:-.}
       dockerfile: ${APP_DOCKERFILE:-Dockerfile}
-      args:
-        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
-        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
-        VITE_SITE_URL: ${VITE_SITE_URL}
-        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-${VITE_SUPABASE_URL}}
-        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-${VITE_SUPABASE_ANON_KEY}}
-    image: stemegle:latest
-    container_name: stemegle_app
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}:latest
     restart: unless-stopped
     depends_on:
-      analytics:
+      backend:
         condition: service_healthy
     ports:
       - "127.0.0.1:${STEMEGLE_PORT:-8097}:80"
@@ -60,7 +194,6 @@ services:
 
   tunnel:
     image: cloudflare/cloudflared:2026.3.0
-    container_name: stemegle_tunnel
     depends_on:
       app:
         condition: service_healthy
@@ -73,23 +206,41 @@ services:
 
   autodeploy:
     build:
-      context: .
+      context: ${APP_SOURCE_DIR:-.}
       dockerfile: deploy/webhook/Dockerfile
-    image: stemegle-autodeploy:latest
-    container_name: stemegle_autodeploy
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-autodeploy:latest
     restart: unless-stopped
     environment:
       DEPLOY_BRANCH: ${DEPLOY_BRANCH:-main}
       DEPLOY_DIR: /repo
       DEPLOY_REPO: ${DEPLOY_REPO:-ritvik22/stemegle}
       DEPLOY_SOURCE_DIR: /repo/source
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      STEMEGLE_IMAGE_PREFIX: ${STEMEGLE_IMAGE_PREFIX:-stemegle}
       STEMEGLE_PORT: ${STEMEGLE_PORT:-8097}
-      STEMEGLE_ANALYTICS_PORT: ${STEMEGLE_ANALYTICS_PORT:-8098}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
-      ANALYTICS_COOKIE_SECRET: ${ANALYTICS_COOKIE_SECRET:-}
+      STEMEGLE_BACKEND_PORT: ${STEMEGLE_BACKEND_PORT:-8787}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-stemegle}
+      POSTGRES_USER: ${POSTGRES_USER:-stemegle_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?Set BETTER_AUTH_URL in .env}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env}
+      ANALYTICS_COOKIE_SECRET: ${ANALYTICS_COOKIE_SECRET:?Set ANALYTICS_COOKIE_SECRET in .env}
+      APP_ALLOWED_ORIGINS: ${APP_ALLOWED_ORIGINS:-}
+      ANALYTICS_RETENTION_DAYS: ${ANALYTICS_RETENTION_DAYS:-400}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-12}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-900}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-172800}
+      BACKUP_VERIFY_DATABASE: ${BACKUP_VERIFY_DATABASE:-stemegle_backup_verify}
     volumes:
       - ./:/repo
       - /var/run/docker.sock:/var/run/docker.sock
     profiles:
       - autodeploy
+
+volumes:
+  postgres_data:
+  postgres_backups:
