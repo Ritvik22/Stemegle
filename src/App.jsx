@@ -500,10 +500,19 @@ function BattleCard() {
   );
 }
 
+// Supabase's email provider requires an email, but we intentionally don't ask
+// users for one — it's a drop-off point. Instead we derive a stable synthetic
+// address from the battle name, so a player signs up and logs back in with just
+// a name + password. Consequences: battle names are unique login identities,
+// and there is no email-based password recovery (a lost password is unrecoverable).
+function battleNameToEmail(name) {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return slug.length >= 2 ? `${slug}@players.stemegle.com` : '';
+}
+
 function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescription, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
   const dialogRef = useDialogA11y(onClose);
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -516,8 +525,8 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
   const valid = isGuest
     ? name.trim().length >= 2
     : isLogin
-      ? email.includes('@') && password.length > 0
-      : name.trim().length >= 2 && email.includes('@') && passwordStrong && password === confirmPassword;
+      ? name.trim().length >= 2 && password.length > 0
+      : name.trim().length >= 2 && passwordStrong && password === confirmPassword;
 
   async function submit(event) {
     event.preventDefault();
@@ -535,11 +544,17 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
       return;
     }
 
+    const derivedEmail = battleNameToEmail(name);
+    if (!derivedEmail) {
+      setError('Use at least 2 letters or numbers in your battle name.');
+      return;
+    }
+
     setLoading(true);
     try {
       if (isLogin) {
         const { error: signInError } = await supabase.auth.signInWithPassword({
-          email: email.trim().toLowerCase(),
+          email: derivedEmail,
           password,
         });
         if (signInError) throw signInError;
@@ -548,7 +563,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
       }
 
       const { data, error: signUpError } = await supabase.auth.signUp({
-        email: email.trim().toLowerCase(),
+        email: derivedEmail,
         password,
         options: {
           data: { battle_name: name.trim() },
@@ -559,12 +574,19 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
       if (data.session) {
         onAuthSuccess();
       } else {
-        setNotice('Account created. Check your email to confirm it, then return and log in.');
-        setPassword('');
-        setConfirmPassword('');
+        // Only reachable if "Confirm email" is still enabled in Supabase — but we
+        // never collected a real email, so there is nothing to confirm.
+        setError('Sign-up needs “Confirm email” turned OFF in your Supabase Auth settings.');
       }
     } catch (authError) {
-      setError(authError?.message || 'Authentication failed. Please try again.');
+      const message = authError?.message || '';
+      if (/already registered|already exists/i.test(message)) {
+        setError('That battle name is already taken. Try another, or log in instead.');
+      } else if (/invalid login credentials/i.test(message)) {
+        setError('Wrong battle name or password. Please try again.');
+      } else {
+        setError(message || 'Authentication failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -572,7 +594,6 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
 
   function switchMode(nextMode) {
     setName('');
-    setEmail('');
     setPassword('');
     setConfirmPassword('');
     setShowPassword(false);
@@ -593,8 +614,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         <h2 id="entry-title">{title}</h2>
         <p>{isGuest ? guestDescription || 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
         <form onSubmit={submit}>
-          {!isLogin && <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete="nickname" /></label>}
-          {!isGuest && <label>Email address<input autoFocus={isLogin} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" /></label>}
+          <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete={isLogin ? 'username' : 'nickname'} /></label>
           {!isGuest && (
             <label>Password
               <span className="password-field">
