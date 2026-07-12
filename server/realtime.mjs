@@ -259,7 +259,13 @@ export function attachRealtimeServer(httpServer, options = {}) {
     );
     if (participantStates.some((member) => !member)) return;
     const authenticatedUsers = participantStates.map((member) => member.userId).filter(Boolean);
-    const ranked = authenticatedUsers.length === participants.length
+    const matchId = topic.slice(MATCH_TOPIC_PREFIX.length);
+    const run = matchRuns.get(matchId);
+    const accountsMatchRun = !run || participantStates.every(
+      (member) => run.participantUsers.get(member.presenceKey) === member.userId,
+    );
+    const ranked = accountsMatchRun
+      && authenticatedUsers.length === participants.length
       && new Set(authenticatedUsers).size === participants.length;
 
     for (const member of tracked) {
@@ -267,7 +273,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
       const ticket = randomBytes(32).toString('base64url');
       const authorization = {
         ticket,
-        matchId: topic.slice(MATCH_TOPIC_PREFIX.length),
+        matchId,
         playerId: member.presenceKey,
         userId: ranked ? member.userId : null,
         ranked,
@@ -555,8 +561,13 @@ export function attachRealtimeServer(httpServer, options = {}) {
     if (participants && message.event === 'start') {
       const matchId = state.topic.slice(MATCH_TOPIC_PREFIX.length);
       if (!matchRuns.has(matchId)) {
+        const activeMembers = [...(topics.get(state.topic) ?? [])].filter((member) => member.presence);
         matchRuns.set(matchId, {
           participants,
+          participantUsers: new Map(participants.map((participant) => [
+            participant,
+            activeMembers.find((member) => member.presenceKey === participant)?.userId || null,
+          ])),
           startsAt: message.payload.startsAt,
           questionCount: message.payload.questions.length,
           questions: validatedMatchQuestions(matchId, message.payload.questions),
@@ -799,6 +810,11 @@ export function attachRealtimeServer(httpServer, options = {}) {
     }
     if (authorization.matchId !== matchId || authorization.playerId !== playerId) return null;
     const run = matchRuns.get(matchId);
+    if (authorization.ranked
+      && run
+      && run.participantUsers.get(playerId) !== authorization.userId) {
+      return null;
+    }
     if (!run || run.finishes.size !== run.participants.length) {
       return { ...authorization, pending: true };
     }

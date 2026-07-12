@@ -474,6 +474,92 @@ test('one account cannot manufacture a ranked match or duplicate a participant',
   }
 });
 
+test('ranked tickets cannot be transplanted onto a run completed by other accounts', async () => {
+  const fixture = await createFixture({ minimumMatchDurationMs: 0, questionTransitionMs: 0 });
+  const originalHost = await openPeer(fixture.url, { headers: { 'x-test-user': 'original-a' } });
+  const originalGuest = await openPeer(fixture.url, { headers: { 'x-test-user': 'original-b' } });
+  const matchId = 'player-a--player-b';
+  const topic = `stemegle:match:${matchId}`;
+  let replacementHost;
+  let replacementGuest;
+  try {
+    originalHost.send(subscription('original-a', topic, 'player-a'));
+    originalGuest.send(subscription('original-b', topic, 'player-b'));
+    await originalHost.next((message) => message.type === 'subscribed');
+    await originalGuest.next((message) => message.type === 'subscribed');
+    await trackPeer(originalHost, 'original-a', { playerId: 'player-a', name: 'Alpha', joinedAt: 1 });
+    await trackPeer(originalGuest, 'original-b', { playerId: 'player-b', name: 'Beta', joinedAt: 2 });
+    const originalTicket = await originalHost.next((message) => message.type === 'match_ticket');
+    await originalGuest.next((message) => message.type === 'match_ticket');
+    assert.equal(originalTicket.ranked, true);
+    await originalHost.close();
+    await originalGuest.close();
+
+    replacementHost = await openPeer(fixture.url);
+    replacementGuest = await openPeer(fixture.url);
+    replacementHost.send(subscription('replacement-a', topic, 'player-a'));
+    replacementGuest.send(subscription('replacement-b', topic, 'player-b'));
+    await replacementHost.next((message) => message.type === 'subscribed');
+    await replacementGuest.next((message) => message.type === 'subscribed');
+    await trackPeer(replacementHost, 'replacement-a', { playerId: 'player-a', name: 'Alpha', joinedAt: 3 });
+    await trackPeer(replacementGuest, 'replacement-b', { playerId: 'player-b', name: 'Beta', joinedAt: 4 });
+    const replacementTicket = await replacementHost.next((message) => message.type === 'match_ticket');
+    await replacementGuest.next((message) => message.type === 'match_ticket');
+    assert.equal(replacementTicket.ranked, false);
+
+    const startsAt = Date.now() + 20;
+    replacementHost.send({
+      type: 'broadcast',
+      ref: 'replacement-start',
+      channelId: 'replacement-a',
+      event: 'start',
+      payload: { startsAt, questions: getQuestionsForMatch(matchId) },
+    });
+    await replacementHost.next((message) => message.type === 'ack' && message.ref === 'replacement-start');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await answerMatch(replacementHost, 'replacement-a', 'player-a', matchId, true);
+    await answerMatch(replacementGuest, 'replacement-b', 'player-b', matchId, false);
+
+    replacementHost.send({
+      type: 'broadcast',
+      ref: 'replacement-host-finish',
+      channelId: 'replacement-a',
+      event: 'finish',
+      payload: { playerId: 'player-a', score: 6000 },
+    });
+    replacementGuest.send({
+      type: 'broadcast',
+      ref: 'replacement-guest-finish',
+      channelId: 'replacement-b',
+      event: 'finish',
+      payload: { playerId: 'player-b', score: 6000 },
+    });
+    await replacementHost.next(
+      (message) => message.type === 'ack' && message.ref === 'replacement-host-finish',
+    );
+    await replacementGuest.next(
+      (message) => message.type === 'ack' && message.ref === 'replacement-guest-finish',
+    );
+
+    assert.equal(fixture.realtime.verifyMatchTicket({
+      ticket: originalTicket.ticket,
+      matchId,
+      playerId: 'player-a',
+    }), null);
+    assert.equal(fixture.realtime.verifyMatchTicket({
+      ticket: replacementTicket.ticket,
+      matchId,
+      playerId: 'player-a',
+    }).ranked, false);
+  } finally {
+    await originalHost.close();
+    await originalGuest.close();
+    await replacementHost?.close();
+    await replacementGuest?.close();
+    await fixture.close();
+  }
+});
+
 test('browser-compatible channels expose server-issued match authorization', async () => {
   const fixture = await createFixture();
   const options = {
