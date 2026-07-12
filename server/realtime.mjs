@@ -22,6 +22,7 @@ const DEFAULT_MAX_MESSAGES_PER_MINUTE = 600;
 const DEFAULT_MATCH_TICKET_TTL_MS = 45 * 60 * 1000;
 const DEFAULT_MINIMUM_MATCH_DURATION_MS = 3000;
 const DEFAULT_QUESTION_TRANSITION_MS = 500;
+const DEFAULT_SERVER_START_DELAY_MS = 500;
 const MATCH_EVENTS = new Set(['ready', 'start', 'answer', 'score', 'finish', 'chat']);
 const PARTY_EVENTS = new Set([
   'party-start',
@@ -184,6 +185,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
     matchTicketTtlMs = DEFAULT_MATCH_TICKET_TTL_MS,
     minimumMatchDurationMs = DEFAULT_MINIMUM_MATCH_DURATION_MS,
     questionTransitionMs = DEFAULT_QUESTION_TRANSITION_MS,
+    serverStartDelayMs = DEFAULT_SERVER_START_DELAY_MS,
     getSessionUserId = async () => null,
   } = options;
   const originAllowlist = allowedOrigins === undefined
@@ -452,10 +454,6 @@ export function attachRealtimeServer(httpServer, options = {}) {
           || !validatedMatchQuestions(state.topic.slice(MATCH_TOPIC_PREFIX.length), payload.questions)) {
           return 'Match start payload is invalid.';
         }
-        const now = Date.now();
-        if (payload.startsAt < now - 1000 || payload.startsAt > now + 10_000) {
-          return 'Match start time is outside the allowed window.';
-        }
         return null;
       }
       if (event === 'answer') {
@@ -568,14 +566,14 @@ export function attachRealtimeServer(httpServer, options = {}) {
             participant,
             activeMembers.find((member) => member.presenceKey === participant)?.userId || null,
           ])),
-          startsAt: message.payload.startsAt,
+          startsAt: Date.now() + serverStartDelayMs,
           questionCount: message.payload.questions.length,
           questions: validatedMatchQuestions(matchId, message.payload.questions),
           answers: new Map(participants.map((participant) => [participant, new Map()])),
           scores: new Map(participants.map((participant) => [participant, 0])),
           progress: new Map(participants.map((participant) => [participant, {
             nextQuestionIndex: 0,
-            questionAvailableAt: message.payload.startsAt,
+            questionAvailableAt: Date.now() + serverStartDelayMs,
           }])),
           finishes: new Map(),
           expiresAt: Date.now() + matchTicketTtlMs,

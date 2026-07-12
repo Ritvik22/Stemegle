@@ -291,7 +291,11 @@ test('broadcasts echo to self, reach peers, dedupe event ids, and reject invalid
 });
 
 test('match topics bind participants, accounts, lifecycle, and host-only events', async () => {
-  const fixture = await createFixture({ minimumMatchDurationMs: 0, questionTransitionMs: 0 });
+  const fixture = await createFixture({
+    minimumMatchDurationMs: 0,
+    questionTransitionMs: 0,
+    serverStartDelayMs: 50,
+  });
   const host = await openPeer(fixture.url, { headers: { 'x-test-user': 'user-a' } });
   const guest = await openPeer(fixture.url, { headers: { 'x-test-user': 'user-b' } });
   const intruder = await openPeer(fixture.url);
@@ -475,7 +479,11 @@ test('one account cannot manufacture a ranked match or duplicate a participant',
 });
 
 test('ranked tickets cannot be transplanted onto a run completed by other accounts', async () => {
-  const fixture = await createFixture({ minimumMatchDurationMs: 0, questionTransitionMs: 0 });
+  const fixture = await createFixture({
+    minimumMatchDurationMs: 0,
+    questionTransitionMs: 0,
+    serverStartDelayMs: 0,
+  });
   const originalHost = await openPeer(fixture.url, { headers: { 'x-test-user': 'original-a' } });
   const originalGuest = await openPeer(fixture.url, { headers: { 'x-test-user': 'original-b' } });
   const matchId = 'player-a--player-b';
