@@ -1,125 +1,64 @@
-import { createClient } from '@supabase/supabase-js';
-import { getQuestionsForMatch } from '../src/data/questions.js';
+import { randomUUID } from 'node:crypto';
+import WebSocket from 'ws';
+import { createRealtimeClient } from '../src/lib/realtime.js';
 
-const fingerprint = (questions) =>
-  (questions ?? []).map((item) => `${item.q}#${item.answer}[${item.choices.join(',')}]`).join(' | ');
+const baseUrl = new URL(process.env.STEMEGLE_URL || 'http://127.0.0.1:8787');
+const requestOrigin = new URL(process.env.STEMEGLE_ORIGIN || baseUrl.origin).origin;
+const socketUrl = new URL('/api/realtime', baseUrl);
+socketUrl.protocol = baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
 
-const url = process.env.VITE_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const key = process.env.VITE_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-if (!url || !key) throw new Error('Missing Supabase public environment variables.');
-
-const playerId = `smoke-${crypto.randomUUID()}`;
-const name = 'RealtimeRobot';
-const supabase = createClient(url, key, { auth: { persistSession: false } });
-let lobby;
-let match;
-let paired = false;
-
-function players(channel) {
-  return Object.values(channel.presenceState()).flat().filter((presence) => presence?.playerId);
-}
-
-async function cleanup(code = 0) {
-  if (lobby) await supabase.removeChannel(lobby);
-  if (match) await supabase.removeChannel(match);
-  await supabase.removeAllChannels();
-  process.exit(code);
-}
-
-function joinMatch(pair) {
-  if (paired) return;
-  paired = true;
-  const ordered = [...pair].sort((a, b) => a.playerId.localeCompare(b.playerId));
-  const opponent = ordered.find((candidate) => candidate.playerId !== playerId);
-  const matchId = ordered.map((candidate) => candidate.playerId).join('--');
-  const isHost = ordered[0].playerId === playerId;
-  let opponentReady = false;
-  let started = false;
-  let startsAt = null;
-  let questionSet = null;
-  let heartbeat;
-
-  match = supabase.channel(`stemegle:match:${matchId}`, {
-    config: { presence: { key: playerId }, broadcast: { self: true, ack: true } },
+function client() {
+  return createRealtimeClient({
+    url: socketUrl,
+    webSocketFactory: (url) => new WebSocket(url, { origin: requestOrigin }),
+    subscribeTimeoutMs: 5000,
+    ackTimeoutMs: 5000,
   });
-
-  match
-    .on('broadcast', { event: 'ready' }, ({ payload }) => {
-      if (payload.playerId !== playerId) opponentReady = true;
-    })
-    .on('broadcast', { event: 'start' }, async ({ payload }) => {
-      if (started) return;
-      started = true;
-      clearInterval(heartbeat);
-      console.log(`MATCHED:${opponent.name}`);
-      console.log(`QUESTIONS:${fingerprint(payload.questions)}`);
-      await lobby.untrack();
-      await supabase.removeChannel(lobby);
-      setTimeout(async () => {
-        await match.send({
-          type: 'broadcast',
-          event: 'score',
-          payload: { playerId, score: 777, questionIndex: 0 },
-        });
-        console.log('SCORE_SENT:777');
-        setTimeout(async () => {
-          await match.send({
-            type: 'broadcast',
-            event: 'finish',
-            payload: { playerId, score: 777 },
-          });
-          console.log('FINISH_SENT:777');
-        }, 1000);
-      }, 2500);
-    })
-    .on('broadcast', { event: 'score' }, ({ payload }) => {
-      if (payload.playerId !== playerId) console.log(`SCORE_RECEIVED:${payload.score}`);
-    })
-    .on('broadcast', { event: 'finish' }, async ({ payload }) => {
-      if (payload.playerId === playerId) return;
-      console.log(`FINISH_RECEIVED:${payload.score}`);
-      await cleanup(0);
-    })
-    .subscribe(async (status) => {
-      if (status === 'SUBSCRIBED') {
-        await match.track({ playerId, name, joinedAt: Date.now() });
-        heartbeat = setInterval(() => {
-          if (started) return;
-          match.send({ type: 'broadcast', event: 'ready', payload: { playerId } });
-          if (isHost && opponentReady) {
-            startsAt = startsAt ?? Date.now() + 2000;
-            questionSet = questionSet ?? getQuestionsForMatch(matchId);
-            match.send({ type: 'broadcast', event: 'start', payload: { startsAt, questions: questionSet } });
-          }
-        }, 700);
-      }
-    });
 }
 
-lobby = supabase.channel('stemegle:lobby:v1', {
-  config: { presence: { key: playerId } },
+async function waitUntil(predicate, message, timeoutMs = 10_000) {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) throw new Error(message);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+const firstClient = client();
+const secondClient = client();
+const firstKey = randomUUID();
+const secondKey = randomUUID();
+const firstStatuses = [];
+const secondStatuses = [];
+const first = firstClient.channel('stemegle:visitors', {
+  config: { presence: { key: firstKey } },
+});
+const second = secondClient.channel('stemegle:visitors', {
+  config: { presence: { key: secondKey } },
 });
 
-lobby
-  .on('presence', { event: 'sync' }, () => {
-    if (paired) return;
-    const queued = players(lobby)
-      .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
-    const ownIndex = queued.findIndex((candidate) => candidate.playerId === playerId);
-    const partnerIndex = ownIndex % 2 === 0 ? ownIndex + 1 : ownIndex - 1;
-    if (queued[partnerIndex]) joinMatch([queued[ownIndex], queued[partnerIndex]]);
-  })
-  .subscribe(async (status) => {
-    if (status === 'SUBSCRIBED') {
-      console.log('LOBBY_READY');
-      await lobby.track({ playerId, name, joinedAt: Date.now() });
-    }
-    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-      console.error(`LOBBY_ERROR:${status}`);
-      await cleanup(1);
-    }
-  });
+first.subscribe((status) => firstStatuses.push(status));
+second.subscribe((status) => secondStatuses.push(status));
 
-setTimeout(() => cleanup(1), 120000);
-process.on('SIGINT', () => cleanup(0));
+try {
+  await waitUntil(
+    () => firstStatuses.includes('SUBSCRIBED') && secondStatuses.includes('SUBSCRIBED'),
+    'Realtime peers did not subscribe',
+  );
+  if (await first.track({ joinedAt: Date.now() }) !== 'ok') {
+    throw new Error('First realtime peer could not track presence');
+  }
+  if (await second.track({ joinedAt: Date.now() }) !== 'ok') {
+    throw new Error('Second realtime peer could not track presence');
+  }
+  await waitUntil(
+    () => first.presenceState()[firstKey] && first.presenceState()[secondKey],
+    'Realtime presence roster did not converge',
+  );
+  console.log('REALTIME_SMOKE_OK: two peers subscribed and synchronized presence');
+} finally {
+  await Promise.allSettled([
+    firstClient.removeAllChannels(),
+    secondClient.removeAllChannels(),
+  ]);
+}

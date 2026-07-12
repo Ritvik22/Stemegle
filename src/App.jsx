@@ -31,17 +31,24 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { fetchGamesPlayed, fetchLeaderboard, fetchRegisteredUsers, getPresencePlayers, hasRealtimeConfig, recordBotMatch, recordMatchResult, supabase } from './lib/supabase';
+import AdminDashboard from './AdminDashboard';
+import {
+  initializeAnalytics,
+  trackAnalyticsEvent,
+  trackPageView,
+} from './lib/analytics';
+import { battleNameToAccountEmail, loginIdentityToEmail } from './lib/accountIdentity';
+import { authClient, fetchAdminAccess, fetchStats, recordBotMatch, recordMatchResult } from './lib/api';
+import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
-const AUTH_REDIRECT_URL = import.meta.env.VITE_SITE_URL || window.location.origin;
 const PARTY_PREFIX = 'stemegle:party:';
 const PARTY_CODE_LENGTH = 5;
 const PARTY_HEARTBEAT_INTERVAL_MS = 5000;
 // Background tabs throttle timers to ~1/minute, so anything under ~2 minutes
-// risks kicking players who simply switched tabs. Supabase presence removes
-// truly disconnected players much sooner; this is only a zombie-tab backstop.
+// risks kicking players who simply switched tabs. Server presence removes truly
+// disconnected players much sooner; this is only a zombie-tab backstop.
 const PARTY_PRESENCE_STALE_MS = 130000;
 
 const VISITOR_ID = (() => {
@@ -61,29 +68,25 @@ function useLiveStats(accountId) {
   const [accountRank, setAccountRank] = useState(null);
 
   useEffect(() => {
-    if (!supabase) return undefined;
-
     let active = true;
     const refreshStats = async () => {
-      const [count, userCount, leaderboardResult] = await Promise.all([
-        fetchGamesPlayed(),
-        fetchRegisteredUsers(),
-        fetchLeaderboard(accountId),
-      ]);
-      if (!active) return;
-      if (count !== null) setGamesPlayed(count);
-      if (userCount !== null) setRegisteredUsers(userCount);
-      if (leaderboardResult === false) {
+      try {
+        const stats = await fetchStats();
+        if (!active) return;
+        setOnlineCount(stats.onlineCount);
+        setGamesPlayed(stats.gamesPlayed);
+        setRegisteredUsers(stats.registeredUsers);
+        setLeaders(stats.leaders);
+        setAccountRank(stats.accountRank);
+      } catch {
+        if (!active) return;
         setLeaders(false);
         setAccountRank(null);
-      } else {
-        setLeaders(leaderboardResult.leaders);
-        setAccountRank(leaderboardResult.accountRank);
       }
     };
     refreshStats();
 
-    const visitorsChannel = supabase.channel('stemegle:visitors', {
+    const visitorsChannel = realtime.channel('stemegle:visitors', {
       config: { presence: { key: VISITOR_ID } },
     });
 
@@ -97,7 +100,7 @@ function useLiveStats(accountId) {
         }
       });
 
-    const statsChannel = supabase
+    const statsChannel = realtime
       .channel('stemegle:ranked-stats')
       .on('postgres_changes', {
         event: 'INSERT',
@@ -114,8 +117,8 @@ function useLiveStats(accountId) {
     return () => {
       active = false;
       visitorsChannel.untrack();
-      supabase.removeChannel(visitorsChannel);
-      supabase.removeChannel(statsChannel);
+      realtime.removeChannel(visitorsChannel);
+      realtime.removeChannel(statsChannel);
     };
   }, [accountId]);
 
@@ -124,6 +127,10 @@ function useLiveStats(accountId) {
 
 function createPlayerId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function playerInitial(value, fallback = '?') {
+  return String(value || '').trim().charAt(0).toUpperCase() || fallback;
 }
 
 function createPartyCode() {
@@ -217,6 +224,7 @@ function createTeamPartyConfig(partyCode, players, leaderId) {
   }
   return {
     id: `${partyCode}-team-${stamp}`,
+    analyticsId: createPlayerId(),
     type: 'team',
     partyCode,
     leaderId,
@@ -232,6 +240,7 @@ function createTournamentPartyConfig(partyCode, players, leaderId) {
   const stamp = Date.now();
   return {
     id: `${partyCode}-tournament-${stamp}`,
+    analyticsId: createPlayerId(),
     type: 'tournament',
     partyCode,
     leaderId,
@@ -447,7 +456,7 @@ function CloudflareBadge() {
   );
 }
 
-function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
   const [open, setOpen] = useState(false);
   return (
     <header className="site-header">
@@ -458,7 +467,8 @@ function Header({ accountName, onGuest, onCreate, onLogin, onLogout, onAccountPl
         <a href="#leaderboard" onClick={() => setOpen(false)}>Leaderboard</a>
         {accountName ? (
           <>
-            <span className="account-pill"><i>{accountName[0].toUpperCase()}</i><span><small>SIGNED IN</small>{accountName}</span></span>
+            <span className="account-pill"><i>{playerInitial(accountName)}</i><span><small>SIGNED IN</small>{accountName}</span></span>
+            {canViewAdmin && <button className="nav-login" onClick={onAdmin}><BarChart3 size={15} /> Analytics</button>}
             <button className="nav-login" onClick={onLogout}>Log out</button>
             <button className="button button-small" onClick={onAccountPlay}>Play now <ArrowRight size={15} /></button>
           </>
@@ -500,16 +510,6 @@ function BattleCard() {
   );
 }
 
-// Supabase's email provider requires an email, but we intentionally don't ask
-// users for one — it's a drop-off point. Instead we derive a stable synthetic
-// address from the battle name, so a player signs up and logs back in with just
-// a name + password. Consequences: battle names are unique login identities,
-// and there is no email-based password recovery (a lost password is unrecoverable).
-function battleNameToEmail(name) {
-  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-  return slug.length >= 2 ? `${slug}@players.stemegle.com` : '';
-}
-
 function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescription, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
   const dialogRef = useDialogA11y(onClose);
   const [name, setName] = useState('');
@@ -519,78 +519,58 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const isGuest = mode === 'guest';
   const isLogin = mode === 'login';
   const passwordStrong = password.length >= 8 && /[A-Za-z]/.test(password) && /\d/.test(password);
   const valid = isGuest
     ? name.trim().length >= 2
     : isLogin
-      ? name.trim().length >= 2 && password.length > 0
-      : name.trim().length >= 2 && passwordStrong && password === confirmPassword;
+      ? Boolean(loginIdentityToEmail(name)) && password.length > 0
+      : Boolean(battleNameToAccountEmail(name)) && passwordStrong && password === confirmPassword;
 
   async function submit(event) {
     event.preventDefault();
     if (!valid || loading) return;
     setError('');
-    setNotice('');
 
     if (isGuest) {
       onGuestStart(name.trim());
       return;
     }
 
-    if (!supabase) {
-      setError('Account services are not configured for this deployment.');
-      return;
-    }
-
-    const derivedEmail = battleNameToEmail(name);
-    if (!derivedEmail) {
-      setError('Use at least 2 letters or numbers in your battle name.');
-      return;
-    }
-
     setLoading(true);
     try {
       if (isLogin) {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email: derivedEmail,
+        const { error: signInError } = await authClient.signIn.email({
+          email: loginIdentityToEmail(name),
           password,
         });
-        if (signInError) throw signInError;
+        if (signInError) throw new Error(signInError.message || 'The battle name or password was not accepted.');
+        await trackAnalyticsEvent('login_succeeded', { status: 'authenticated' });
         onAuthSuccess();
         return;
       }
 
-      const { data, error: signUpError } = await supabase.auth.signUp({
-        email: derivedEmail,
+      trackAnalyticsEvent('signup_started');
+      const { error: signUpError } = await authClient.signUp.email({
+        name: name.trim(),
+        email: battleNameToAccountEmail(name),
         password,
-        options: {
-          data: {
-            battle_name: name.trim(),
-            ...(contactEmail.trim() ? { contact_email: contactEmail.trim().toLowerCase() } : {}),
-          },
-          emailRedirectTo: AUTH_REDIRECT_URL,
-        },
+        contactEmail: contactEmail.trim().toLowerCase() || undefined,
       });
-      if (signUpError) throw signUpError;
-      if (data.session) {
-        onAuthSuccess();
-      } else {
-        // Only reachable if "Confirm email" is still enabled in Supabase — but we
-        // never collected a real email, so there is nothing to confirm.
-        setError('Sign-up needs “Confirm email” turned OFF in your Supabase Auth settings.');
+      if (signUpError) {
+        const message = signUpError.message || '';
+        if (/already|exists|unique/i.test(message)) {
+          throw new Error('That battle name is already taken. Try another, or log in instead.');
+        }
+        throw new Error(message || 'The account could not be created.');
       }
+      // Better Auth has set the secure session cookie at this point, so this
+      // event can associate the first-touch visitor journey with the new user.
+      await trackAnalyticsEvent('signup_succeeded', { status: 'authenticated' });
+      onAuthSuccess();
     } catch (authError) {
-      const message = authError?.message || '';
-      if (/already registered|already exists/i.test(message)) {
-        setError('That battle name is already taken. Try another, or log in instead.');
-      } else if (/invalid login credentials/i.test(message)) {
-        setError('Wrong battle name or password. Please try again.');
-      } else {
-        setError(message || 'Authentication failed. Please try again.');
-      }
+      setError(authError?.message || 'Authentication failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -603,7 +583,6 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
     setConfirmPassword('');
     setShowPassword(false);
     setError('');
-    setNotice('');
     onSwitch(nextMode);
   }
 
@@ -619,7 +598,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         <h2 id="entry-title">{title}</h2>
         <p>{isGuest ? guestDescription || 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
         <form onSubmit={submit}>
-          <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete={isLogin ? 'username' : 'nickname'} /></label>
+          <label>{isLogin ? 'Battle name or email' : 'Battle name'}<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={isLogin ? 320 : 18} autoComplete={isLogin ? 'username' : 'nickname'} /></label>
           {!isGuest && !isLogin && (
             <label>
               <span className="label-row">Email address <small>Optional</small></span>
@@ -637,10 +616,9 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
           {!isGuest && !isLogin && <label>Confirm password<input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Repeat your password" autoComplete="new-password" /></label>}
           {!isGuest && !isLogin && <p id="pw-requirements" className={password && !passwordStrong ? 'password-rule invalid' : 'password-rule'}><Lock aria-hidden="true" /> Use 8+ characters with at least one letter and one number.</p>}
           {error && <p className="auth-message error" role="alert">{error}</p>}
-          {notice && <p className="auth-message success" role="status">{notice}</p>}
           <button type="submit" className="button button-wide" disabled={!valid || loading}>{loading ? 'Please wait…' : isGuest ? guestActionLabel : isLogin ? 'Log in' : 'Create account'} {!loading && <ArrowRight size={18} />}</button>
         </form>
-        <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'Passwords are handled securely by Supabase Auth.'}</small>
+        <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'Passwords are protected by secure, server-side authentication.'}</small>
         {!isGuest && <button className="auth-switch" onClick={() => switchMode(isLogin ? 'create' : 'login')}>{isLogin ? 'New here? Create an account' : 'Already have an account? Log in'}</button>}
       </div>
     </div>
@@ -653,6 +631,12 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
   const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'configuration-error');
   const [error, setError] = useState('');
   const playerId = useRef(createPlayerId());
+  const queueConnectedTracked = useRef(false);
+  const opponentFoundTracked = useRef(false);
+
+  useEffect(() => {
+    trackAnalyticsEvent('queue_started');
+  }, []);
 
   useEffect(() => {
     const waitTicker = setInterval(() => setSecondsWaiting((seconds) => seconds + 1), 1000);
@@ -668,7 +652,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
       attempt.intervals.forEach(clearInterval);
       attempt.timers.forEach(clearTimeout);
       attempt.channel.untrack();
-      supabase.removeChannel(attempt.channel);
+      realtime.removeChannel(attempt.channel);
       attempt = null;
       setOpponentOnline(false);
       setStatus('waiting');
@@ -688,7 +672,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         },
       };
 
-      const channel = supabase.channel(`stemegle:match:${matchId}`, {
+      const channel = realtime.channel(`stemegle:match:${matchId}`, {
         config: {
           presence: { key: playerId.current },
           broadcast: { self: true, ack: true },
@@ -706,7 +690,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         attempt.intervals.forEach(clearInterval);
         attempt.timers.forEach(clearTimeout);
         lobbyChannel.untrack();
-        supabase.removeChannel(lobbyChannel);
+        realtime.removeChannel(lobbyChannel);
         lobbyChannel = null;
         onMatched({
           id: matchId,
@@ -715,6 +699,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
           playerId: playerId.current,
           opponent: { id: opponent.playerId, name: opponent.name },
           startsAt: payload.startsAt,
+          getAuthorization: () => channel.matchAuthorization(),
           // Host is the single source of truth for the question set so both
           // players always get an identical match, even if their local question
           // banks differ (e.g. mid-deploy). Fall back to deriving from matchId.
@@ -736,6 +721,10 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
           if (matchPlayers.length === 2 && !joinedMatch) {
             setOpponentOnline(true);
             setStatus('opponent-found');
+            if (!opponentFoundTracked.current) {
+              opponentFoundTracked.current = true;
+              trackAnalyticsEvent('opponent_found');
+            }
           }
         })
         .subscribe(async (subscriptionStatus) => {
@@ -746,7 +735,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
             attempt.intervals.push(setInterval(() => {
               if (joinedMatch || !active) return;
               channel.send({ type: 'broadcast', event: 'ready', payload: { playerId: playerId.current } });
-              if (isHost && opponentReady) {
+              if (isHost && opponentReady && channel.matchAuthorization()) {
                 startsAt = startsAt ?? Date.now() + 2000;
                 questionSet = questionSet ?? getQuestionsForMatch(matchId);
                 channel.send({ type: 'broadcast', event: 'start', payload: { startsAt, questions: questionSet } });
@@ -794,7 +783,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
       beginAttempt(partner);
     };
 
-    lobbyChannel = supabase.channel(LOBBY_CHANNEL, {
+    lobbyChannel = realtime.channel(LOBBY_CHANNEL, {
       config: { presence: { key: playerId.current } },
     });
 
@@ -804,6 +793,10 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('waiting');
           await lobbyChannel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+          if (!queueConnectedTracked.current) {
+            queueConnectedTracked.current = true;
+            trackAnalyticsEvent('queue_connected');
+          }
         }
         if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
           setError('Unable to reach the multiplayer lobby. Check your connection and try again.');
@@ -816,7 +809,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
       clearInterval(waitTicker);
       if (lobbyChannel) {
         lobbyChannel.untrack();
-        supabase.removeChannel(lobbyChannel);
+        realtime.removeChannel(lobbyChannel);
       }
       if (attempt && !joinedMatch) clearAttempt();
     };
@@ -832,10 +825,10 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
   return (
     <main className="game-shell matchmaking-screen">
       <Logo />
-      <div className="radar" aria-hidden="true"><span className="radar-ring r1" /><span className="radar-ring r2" /><span className="radar-ring r3" /><span className="radar-sweep" /><span className="avatar avatar-you radar-avatar">{name[0].toUpperCase()}</span></div>
+      <div className="radar" aria-hidden="true"><span className="radar-ring r1" /><span className="radar-ring r2" /><span className="radar-ring r3" /><span className="radar-sweep" /><span className="avatar avatar-you radar-avatar">{playerInitial(name)}</span></div>
       <p className="eyebrow"><i className="status-dot" /> {hasError ? 'CONNECTION NEEDED' : opponentOnline ? 'OPPONENT ONLINE' : connecting ? 'CONNECTING LIVE' : 'YOU’RE IN THE QUEUE'}</p>
       <h1 aria-live="polite">{hasError ? 'Multiplayer is offline' : opponentOnline ? 'Opponent found!' : connecting ? 'Joining the lobby...' : 'Waiting for a rival...'}</h1>
-      <p>{hasError ? error || 'Supabase environment variables are missing from this deployment.' : opponentOnline ? 'Both players are connected. Your match is starting.' : 'You’ll be matched as soon as another real player comes online'}</p>
+      <p>{hasError ? error || 'The realtime service is unavailable on this deployment.' : opponentOnline ? 'Both players are connected. Your match is starting.' : 'You’ll be matched as soon as another real player comes online'}</p>
       <div className="search-progress" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} aria-label={opponentOnline ? 'Opponent found — match ready' : 'Searching for opponent'}><i style={{ width: `${progress}%` }} /></div>
       <div className="match-stats">
         <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? 'Rival connected' : 'Waiting for another player'}</span>
@@ -849,7 +842,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         </div>
       )}
       {!opponentOnline && !hasError && <p className="queue-note">Keep this tab open, or jump into a bot match anytime.</p>}
-      <button className="text-button" onClick={onCancel}>Cancel search</button>
+      <button className="text-button" onClick={() => onCancel({ secondsWaiting, status })}>Cancel search</button>
     </main>
   );
 }
@@ -887,12 +880,13 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
     }
 
     let active = true;
+    let joinedTracked = false;
     setStatus('connecting');
     setError('');
     setChat([]);
     heartbeatsRef.current = {};
     joinedAtRef.current = Date.now();
-    const channel = supabase.channel(`${PARTY_PREFIX}${code}`, {
+    const channel = realtime.channel(`${PARTY_PREFIX}${code}`, {
       config: {
         presence: { key: playerIdRef.current },
         broadcast: { self: true, ack: true },
@@ -968,6 +962,10 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('ready');
           sendHeartbeat();
+          if (!joinedTracked) {
+            joinedTracked = true;
+            trackAnalyticsEvent('party_joined', { party_size: Math.max(1, getPartyRoster(channel).length) });
+          }
         }
         if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
           setStatus('error');
@@ -983,7 +981,7 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
       clearInterval(heartbeatTimer);
       document.removeEventListener('visibilitychange', handleVisibility);
       channel.untrack();
-      supabase.removeChannel(channel);
+      realtime.removeChannel(channel);
       if (channelRef.current === channel) channelRef.current = null;
     };
   // The channel lives at the app level for as long as the party code does, so
@@ -1064,7 +1062,7 @@ function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onL
         <h1>{partyCode ? `Party ${partyCode}` : 'Create or join a party'}</h1>
         <p>{partyCode ? 'Share the code, wait for friends to appear, then the party leader chooses the game type. The party stays together between games.' : 'Create a private party code or paste a friend’s code to join their room.'}</p>
 
-        {(hasError || error) && <p className="auth-message error" role="alert">{displayError || 'Supabase realtime is not configured for parties on this deployment.'}</p>}
+        {(hasError || error) && <p className="auth-message error" role="alert">{displayError || 'Realtime parties are unavailable on this deployment.'}</p>}
 
         {!partyCode && (
           <div className="party-entry-grid">
@@ -1087,7 +1085,7 @@ function PartyRoom({ partyCode, party, playerId, onCreateParty, onJoinParty, onL
               <div className="party-roster-head"><span>{players.length} in party</span><small>{isLeader ? 'You are the leader' : leaderId ? `${players.find((member) => member.playerId === leaderId)?.name ?? 'A friend'} is the leader` : 'Waiting for party leader'}</small></div>
               {players.map((player) => (
                 <div className="party-player" key={player.playerId}>
-                  <span className="leader-avatar">{player.name[0].toUpperCase()}</span>
+                  <span className="leader-avatar">{playerInitial(player.name)}</span>
                   <strong>{player.name}</strong>
                   {player.playerId === leaderId && <small>LEADER</small>}
                 </div>
@@ -1170,9 +1168,12 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
   const [started, setStarted] = useState(Date.now() >= game.startsAt);
   const transitionTimer = useRef(null);
   const resolvedRounds = useRef(new Set());
+  const startedTracked = useRef(false);
   const round = game.rounds[roundIndex];
   const question = game.questions[round.questionIndex];
   const isActive = round.playerId === game.playerId;
+  const ownTeam = game.roster.find((member) => member.playerId === game.playerId)?.team;
+  const analyticsGameId = game.analyticsId || 'party-team-game';
   const teamA = game.roster.filter((member) => member.team === 'A');
   const teamB = game.roster.filter((member) => member.team === 'B');
 
@@ -1199,6 +1200,7 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
           opponentScore: finalScores.B,
           teamScores: finalScores,
           winner,
+          outcome: winner === 'TIE' ? 'tie' : winner === ownTeam ? 'win' : 'loss',
           summary: winner === 'TIE' ? 'Team battle tied.' : `Team ${winner} wins the party battle.`,
         });
         return;
@@ -1208,11 +1210,19 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
       setSelected(null);
       setFeedback('');
     }, 950);
-  }, [game.rounds.length, onFinish, round.id, roundIndex, scores]);
+  }, [game.rounds.length, onFinish, ownTeam, round.id, roundIndex, scores]);
 
   useEffect(() => {
     const delay = Math.max(0, game.startsAt - Date.now());
-    const startTimer = setTimeout(() => setStarted(true), delay);
+    const startTimer = setTimeout(() => {
+      setStarted(true);
+      if (!startedTracked.current) {
+        startedTracked.current = true;
+        const properties = { game_id: analyticsGameId, attempt_id: `${analyticsGameId}:${game.playerId}`, mode: 'party_team', total_rounds: game.rounds.length };
+        trackAnalyticsEvent('party_game_started', { ...properties, game_type: 'team', party_size: game.roster.length });
+        trackAnalyticsEvent('game_started', properties);
+      }
+    }, delay);
     const unsubscribe = game.events.subscribe((event, payload) => {
       if (event === 'answer' || event === 'timeout') resolveRound(payload);
     });
@@ -1253,6 +1263,20 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
 
   useEffect(() => {
     if (time > 0 || selected !== null || resolvedRounds.current.has(round.id)) return;
+    if (isActive) {
+      trackAnalyticsEvent('game_question_answered', {
+        game_id: analyticsGameId,
+        attempt_id: `${analyticsGameId}:${game.playerId}`,
+        mode: 'party_team',
+        round: roundIndex + 1,
+        total_rounds: game.rounds.length,
+        category: question.category,
+        correct: false,
+        timed_out: true,
+        response_ms: 15000,
+        score: playerScores[game.playerId] || 0,
+      });
+    }
     game.channel.send({
       type: 'broadcast',
       event: 'party-timeout',
@@ -1267,12 +1291,24 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
         timedOut: true,
       },
     });
-  }, [game.channel, round, selected, time]);
+  }, [game.channel, game.id, game.playerId, game.rounds.length, isActive, playerScores, question.category, round, roundIndex, selected, time]);
 
   function choose(index) {
     if (!started || !isActive || selected !== null || resolvedRounds.current.has(round.id)) return;
     const correct = index === question.answer;
     const gain = correct ? 500 + Math.round(time * 45) : 0;
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: analyticsGameId,
+      attempt_id: `${analyticsGameId}:${game.playerId}`,
+      mode: 'party_team',
+      round: roundIndex + 1,
+      total_rounds: game.rounds.length,
+      category: question.category,
+      correct,
+      timed_out: false,
+      response_ms: Math.max(0, Math.round((15 - time) * 1000)),
+      score: (playerScores[game.playerId] || 0) + gain,
+    });
     game.channel.send({
       type: 'broadcast',
       event: 'party-answer',
@@ -1288,9 +1324,22 @@ function TeamPartyGame({ player, game, onFinish, onExit }) {
     });
   }
 
+  function exitGame() {
+    trackAnalyticsEvent('game_abandoned', {
+      game_id: analyticsGameId,
+      attempt_id: `${analyticsGameId}:${game.playerId}`,
+      mode: 'party_team',
+      round: roundIndex + 1,
+      total_rounds: game.rounds.length,
+      score: playerScores[game.playerId] || 0,
+      reason: 'explicit_exit',
+    });
+    onExit();
+  }
+
   return (
     <main className="game-shell arena party-game">
-      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> PARTY TEAM · ROUND {roundIndex + 1}/{game.rounds.length}</span><button className="icon-button" aria-label="Exit party game" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> PARTY TEAM · ROUND {roundIndex + 1}/{game.rounds.length}</span><button className="icon-button" aria-label="Exit party game" onClick={exitGame}><X /></button></div>
       <div className="party-scoreboard">
         <div><small>TEAM A</small><strong>{scores.A.toLocaleString()}</strong><span>{teamA.map((member) => member.name).join(', ')}</span></div>
         <div className="vs-badge">VS</div>
@@ -1333,6 +1382,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   const transitionTimer = useRef(null);
   const resolvedDuels = useRef(new Set());
   const answersRef = useRef({});
+  const startedTracked = useRef(false);
   const pair = tournament.pairs[tournament.matchIndex] || [];
   // Namespaced by game id: the party channel outlives games, so a late duel
   // broadcast from a previous game must never match this game's duels.
@@ -1341,6 +1391,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   const question = game.questions[questionIndex];
   const isDuelist = pair.some((member) => member.playerId === game.playerId);
   const hasAnswered = Boolean(duelAnswers[game.playerId]);
+  const analyticsGameId = game.analyticsId || 'party-tournament-game';
 
   const applyDuelResult = useCallback((payload) => {
     if (!payload || payload.duelId !== duelId || resolvedDuels.current.has(payload.duelId)) return;
@@ -1402,7 +1453,15 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
 
   useEffect(() => {
     const delay = Math.max(0, game.startsAt - Date.now());
-    const startTimer = setTimeout(() => setStarted(true), delay);
+    const startTimer = setTimeout(() => {
+      setStarted(true);
+      if (!startedTracked.current) {
+        startedTracked.current = true;
+        const properties = { game_id: analyticsGameId, attempt_id: `${analyticsGameId}:${game.playerId}`, mode: 'party_tournament', total_rounds: game.questions.length };
+        trackAnalyticsEvent('party_game_started', { ...properties, game_type: 'tournament', party_size: game.entrants.length });
+        trackAnalyticsEvent('game_started', properties);
+      }
+    }, delay);
     const unsubscribe = game.events.subscribe((event, payload) => {
       if (event === 'duel-answer' && payload?.duelId === duelId) {
         answersRef.current = { ...answersRef.current, [payload.playerId]: payload };
@@ -1459,9 +1518,24 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
       const byeTimer = setTimeout(() => resolveDuel('bye'), 700);
       return () => clearTimeout(byeTimer);
     }
-    const timeout = setTimeout(() => resolveDuel('timeout'), 15000);
+    const timeout = setTimeout(() => {
+      if (isDuelist && !hasAnswered) {
+        trackAnalyticsEvent('game_question_answered', {
+          game_id: analyticsGameId,
+          attempt_id: `${analyticsGameId}:${game.playerId}`,
+          mode: 'party_tournament',
+          round: tournament.roundNumber,
+          total_rounds: game.questions.length,
+          category: question.category,
+          correct: false,
+          timed_out: true,
+          response_ms: 15000,
+        });
+      }
+      resolveDuel('timeout');
+    }, 15000);
     return () => clearTimeout(timeout);
-  }, [duelId, pair.length, resolveDuel, started]);
+  }, [duelId, game.id, game.playerId, game.questions.length, hasAnswered, isDuelist, pair.length, question.category, resolveDuel, started, tournament.roundNumber]);
 
   function choose(index) {
     if (!started || !isDuelist || hasAnswered || selected !== null || resolvedDuels.current.has(duelId)) return;
@@ -1469,6 +1543,18 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
     const gain = correct ? 500 + Math.round(time * 45) : 0;
     setSelected(index);
     setFeedback(correct ? `Locked in +${gain}` : 'Locked in — not quite.');
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: analyticsGameId,
+      attempt_id: `${analyticsGameId}:${game.playerId}`,
+      mode: 'party_tournament',
+      round: tournament.roundNumber,
+      total_rounds: game.questions.length,
+      category: question.category,
+      correct,
+      timed_out: false,
+      response_ms: Math.max(0, Math.round((15 - time) * 1000)),
+      score: gain,
+    });
     game.channel.send({
       type: 'broadcast',
       event: 'party-duel-answer',
@@ -1484,9 +1570,21 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
     });
   }
 
+  function exitGame() {
+    trackAnalyticsEvent('game_abandoned', {
+      game_id: analyticsGameId,
+      attempt_id: `${analyticsGameId}:${game.playerId}`,
+      mode: 'party_tournament',
+      round: tournament.roundNumber,
+      total_rounds: game.questions.length,
+      reason: 'explicit_exit',
+    });
+    onExit();
+  }
+
   return (
     <main className="game-shell arena party-game">
-      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> TOURNAMENT · ROUND {tournament.roundNumber}</span><button className="icon-button" aria-label="Exit tournament" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className="game-live-dot" /> TOURNAMENT · ROUND {tournament.roundNumber}</span><button className="icon-button" aria-label="Exit tournament" onClick={exitGame}><X /></button></div>
       <div className="party-scoreboard tournament-board">
         <div><small>DUELIST</small><strong>{pair[0]?.name || 'TBD'}</strong><span>{duelAnswers[pair[0]?.playerId]?.gain?.toLocaleString?.() || 'Waiting'}</span></div>
         <div className="vs-badge">VS</div>
@@ -1528,11 +1626,18 @@ function Game({ player, match, onFinish, onExit }) {
   const [chatMessages, setChatMessages] = useState([]);
   const transitionTimer = useRef(null);
   const localFinal = useRef(null);
+  const localFinishSent = useRef(false);
   const remoteFinal = useRef(null);
   const deliveredResult = useRef(false);
+  const startedTracked = useRef(false);
+  const opponentWasConnected = useRef(true);
+  const questionIndexRef = useRef(questionIndex);
+  questionIndexRef.current = questionIndex;
   const opponentScoreRef = useRef(0);
   const question = questions[questionIndex];
   const opponent = match.opponent.name;
+  const gameMode = match.isBot ? 'bot' : 'human';
+  const attemptId = `${match.id}:${match.playerId}`;
 
   useEffect(() => {
     const renderGameState = () => JSON.stringify({
@@ -1556,20 +1661,34 @@ function Game({ player, match, onFinish, onExit }) {
   const deliverResult = useCallback((localScore, remoteScore) => {
     if (deliveredResult.current || localScore === null || remoteScore === null) return;
     deliveredResult.current = true;
+    trackAnalyticsEvent('game_completed', {
+      game_id: match.id,
+      attempt_id: attemptId,
+      mode: gameMode,
+      round: questions.length,
+      total_rounds: questions.length,
+      score: localScore,
+      opponent_score: remoteScore,
+      outcome: localScore >= remoteScore ? 'win' : 'loss',
+    });
     onFinish({ score: localScore, opponentScore: remoteScore });
-  }, [onFinish]);
+  }, [attemptId, gameMode, match.id, onFinish, questions.length]);
 
   const finishLocal = useCallback((finalScore) => {
-    if (localFinal.current !== null) return;
-    localFinal.current = finalScore;
+    if (localFinishSent.current) return;
+    localFinishSent.current = true;
     setFeedback(remoteFinal.current === null ? 'Finished! Waiting for your rival…' : 'Match complete!');
+    if (match.isBot) {
+      localFinal.current = finalScore;
+      deliverResult(finalScore, remoteFinal.current);
+      return;
+    }
     match.channel.send({
       type: 'broadcast',
       event: 'finish',
       payload: { playerId: match.playerId, score: finalScore },
     });
-    deliverResult(finalScore, remoteFinal.current);
-  }, [deliverResult, match.channel, match.playerId]);
+  }, [deliverResult, match.channel, match.isBot, match.playerId]);
 
   const advance = useCallback((finalScore) => {
     if (questionIndex === questions.length - 1) {
@@ -1584,7 +1703,18 @@ function Game({ player, match, onFinish, onExit }) {
 
   useEffect(() => {
     const delay = Math.max(0, match.startsAt - Date.now());
-    const startTimer = setTimeout(() => setStarted(true), delay);
+    const startTimer = setTimeout(() => {
+      setStarted(true);
+      if (!startedTracked.current) {
+        startedTracked.current = true;
+        trackAnalyticsEvent('game_started', {
+          game_id: match.id,
+          attempt_id: attemptId,
+          mode: gameMode,
+          total_rounds: questions.length,
+        });
+      }
+    }, delay);
 
     const unsubscribe = match.events.subscribe((event, payload) => {
       if (event === 'score') {
@@ -1593,7 +1723,12 @@ function Game({ player, match, onFinish, onExit }) {
         setOpponentScore(payload.score);
       }
       if (event === 'finish') {
-        if (payload.playerId === match.playerId) return;
+        if (payload.playerId === match.playerId) {
+          localFinal.current = payload.score;
+          setScore(payload.score);
+          deliverResult(payload.score, remoteFinal.current);
+          return;
+        }
         remoteFinal.current = payload.score;
         opponentScoreRef.current = payload.score;
         setOpponentScore(payload.score);
@@ -1602,7 +1737,17 @@ function Game({ player, match, onFinish, onExit }) {
       }
       if (event === 'presence') {
         const players = payload;
-        setOpponentConnected(players.some((candidate) => candidate.playerId === match.opponent.id));
+        const connected = players.some((candidate) => candidate.playerId === match.opponent.id);
+        if (opponentWasConnected.current && !connected) {
+          trackAnalyticsEvent('opponent_disconnected', {
+            game_id: match.id,
+            attempt_id: attemptId,
+            mode: gameMode,
+            round: questionIndexRef.current + 1,
+          });
+        }
+        opponentWasConnected.current = connected;
+        setOpponentConnected(connected);
       }
       if (event === 'chat') {
         setChatMessages((current) => appendChatMessage(current, payload));
@@ -1614,8 +1759,8 @@ function Game({ player, match, onFinish, onExit }) {
       clearTimeout(startTimer);
       clearTimeout(transitionTimer.current);
       match.channel.untrack();
-      // Bot matches use a local stub channel, not a Supabase channel.
-      if (!match.isBot) supabase.removeChannel(match.channel);
+      // Bot matches use a local stub channel rather than a network channel.
+      if (!match.isBot) realtime.removeChannel(match.channel);
     };
   }, [deliverResult, match]);
 
@@ -1629,8 +1774,32 @@ function Game({ player, match, onFinish, onExit }) {
     if (time > 0 || selected !== null) return;
     setSelected(-1);
     setFeedback('Time!');
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: match.id,
+      attempt_id: attemptId,
+      mode: gameMode,
+      round: questionIndex + 1,
+      total_rounds: questions.length,
+      category: question.category,
+      correct: false,
+      timed_out: true,
+      response_ms: 15000,
+      score,
+    });
+    if (!match.isBot) {
+      match.channel.send({
+        type: 'broadcast',
+        event: 'answer',
+        payload: {
+          playerId: match.playerId,
+          questionIndex,
+          selected: -1,
+          responseMs: 15000,
+        },
+      });
+    }
     transitionTimer.current = setTimeout(() => advance(score), 750);
-  }, [advance, score, selected, time]);
+  }, [advance, attemptId, gameMode, match.id, question.category, questionIndex, questions.length, score, selected, time]);
 
   function choose(index) {
     if (!started || selected !== null || localFinal.current !== null) return;
@@ -1638,14 +1807,49 @@ function Game({ player, match, onFinish, onExit }) {
     const correct = index === question.answer;
     const gain = correct ? 500 + Math.round(time * 45) : 0;
     const nextScore = score + gain;
+    const responseMs = Math.max(0, Math.round((15 - time) * 1000));
     setScore(nextScore);
     setFeedback(correct ? `Correct! +${gain}` : 'Not quite!');
+    trackAnalyticsEvent('game_question_answered', {
+      game_id: match.id,
+      attempt_id: attemptId,
+      mode: gameMode,
+      round: questionIndex + 1,
+      total_rounds: questions.length,
+      category: question.category,
+      correct,
+      timed_out: false,
+      response_ms: responseMs,
+      score: nextScore,
+    });
     match.channel.send({
       type: 'broadcast',
       event: 'score',
       payload: { playerId: match.playerId, score: nextScore, questionIndex },
     });
+    if (!match.isBot) {
+      match.channel.send({
+        type: 'broadcast',
+        event: 'answer',
+        payload: { playerId: match.playerId, questionIndex, selected: index, responseMs },
+      });
+    }
     transitionTimer.current = setTimeout(() => advance(nextScore), 850);
+  }
+
+  function exitGame() {
+    if (!deliveredResult.current) {
+      trackAnalyticsEvent('game_abandoned', {
+        game_id: match.id,
+        attempt_id: attemptId,
+        mode: gameMode,
+        round: questionIndex + 1,
+        total_rounds: questions.length,
+        score,
+        reason: localFinal.current === null ? 'explicit_exit' : 'left_waiting_for_opponent',
+      });
+    }
+    onExit();
   }
 
   function sendChat(text) {
@@ -1656,9 +1860,9 @@ function Game({ player, match, onFinish, onExit }) {
 
   return (
     <main className="game-shell arena">
-      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{questions.length}</span><button className="icon-button" aria-label="Exit game" onClick={onExit}><X /></button></div>
+      <div className="game-header"><Logo /><span className="round-label"><i className={opponentConnected ? 'game-live-dot' : 'game-live-dot offline'} /> LIVE · ROUND {questionIndex + 1}/{questions.length}</span><button className="icon-button" aria-label="Exit game" onClick={exitGame}><X /></button></div>
       <div className="scoreboard">
-        <div className="game-player"><span className="avatar avatar-you">{player[0].toUpperCase()}</span><div><small>YOU</small><strong>{player}</strong></div><b>{score.toLocaleString()}</b></div>
+        <div className="game-player"><span className="avatar avatar-you">{playerInitial(player)}</span><div><small>YOU</small><strong>{player}</strong></div><b>{score.toLocaleString()}</b></div>
         <div className="vs-badge">VS</div>
         <div className="game-player rival"><b>{opponentScore.toLocaleString()}</b><div><small>{opponentFinished ? 'FINISHED' : opponentConnected ? 'RIVAL · LIVE' : 'RECONNECTING'}</small><strong>{opponent}</strong></div><span className="avatar avatar-nova">{opponent[0]}</span></div>
       </div>
@@ -1701,9 +1905,9 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
         )}
         {isTournament && (
           <div className="result-card">
-            <div><span className="avatar avatar-you">{result.champion[0].toUpperCase()}</span><strong>Champion</strong><b>{result.champion}</b></div>
+            <div><span className="avatar avatar-you">{playerInitial(result.champion)}</span><strong>Champion</strong><b>{result.champion}</b></div>
             <span className="result-vs">#1</span>
-            <div><span className="avatar avatar-nova">{player[0].toUpperCase()}</span><strong>You</strong><b>{result.champion === player ? 'Winner' : 'GG'}</b></div>
+            <div><span className="avatar avatar-nova">{playerInitial(player)}</span><strong>You</strong><b>{result.champion === player ? 'Winner' : 'GG'}</b></div>
           </div>
         )}
         <div className="result-actions">
@@ -1725,7 +1929,7 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
       <h1>{won ? 'Brilliant win!' : 'So close. Run it back?'}</h1>
       <p>{result.vsBot ? 'Practice match against a bot — it counts toward matches played, but not your ranked score.' : won ? 'Fast thinking pays off. Your rank is moving up.' : 'Every match sharpens the mind. Your next rival is waiting.'}</p>
       <div className="result-card">
-        <div><span className="avatar avatar-you">{player[0].toUpperCase()}</span><strong>{player}</strong><b>{result.score.toLocaleString()}</b></div>
+        <div><span className="avatar avatar-you">{playerInitial(player)}</span><strong>{player}</strong><b>{result.score.toLocaleString()}</b></div>
         <span className="result-vs">{won ? 'WIN' : 'GG'}</span>
         <div><span className="avatar avatar-nova">{opponent[0]}</span><strong>{opponent}</strong><b>{result.opponentScore.toLocaleString()}</b></div>
       </div>
@@ -1735,12 +1939,11 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
   );
 }
 
-function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCount, gamesPlayed, registeredUsers, leaders, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Header accountName={accountName} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
-      {authNotice && <div className="auth-notice" role="status">{authNotice}<button onClick={onNoticeClose} aria-label="Dismiss"><X size={16} /></button></div>}
+      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
       <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
         <span className="leaderboard-fab-icon"><Trophy aria-hidden="true" /></span>
         <span><small>{accountRank ? `YOUR RANK · #${accountRank.rank_position}` : 'LIVE GLOBAL RANKS'}</small><strong>{accountRank ? 'Climb even higher' : 'Can you take the top spot?'}</strong></span>
@@ -1812,13 +2015,13 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
                 <div className="leader-cols" role="row"><span role="columnheader">RANK & ACCOUNT</span><span role="columnheader">WINS</span><span role="columnheader">SCORE</span></div>
               </div>
               <div role="rowgroup">
-                {Array.isArray(leaders) && leaders.map((leader) => <div className="leader-row" role="row" key={leader.id}><span role="cell" className={leader.rank_position <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank_position}</span><span role="presentation" className="leader-avatar">{leader.battle_name[0].toUpperCase()}</span><strong role="cell">{leader.battle_name}{leader.rank_position === 1 && <><Crown size={14} aria-hidden="true" /><span className="sr-only"> — Champion</span></>}</strong><span role="cell" className="streak">{leader.wins.toLocaleString()}</span><b role="cell">{leader.total_score.toLocaleString()}</b></div>)}
+                {Array.isArray(leaders) && leaders.map((leader) => <div className="leader-row" role="row" key={leader.id}><span role="cell" className={leader.rank_position <= 3 ? 'leader-rank top' : 'leader-rank'}>{leader.rank_position}</span><span role="presentation" className="leader-avatar">{playerInitial(leader.battle_name)}</span><strong role="cell"><span className="leader-name">{leader.battle_name || 'Unnamed player'}</span>{leader.legacy && <small className="legacy-rank" title="Imported historical rank; not linked to a new account">UNCLAIMED</small>}{leader.rank_position === 1 && <><Crown size={14} aria-hidden="true" /><span className="sr-only"> — Champion</span></>}</strong><span role="cell" className="streak">{leader.wins.toLocaleString()}</span><b role="cell">{leader.total_score.toLocaleString()}</b></div>)}
                 {leaders === null && <div className="leader-empty"><Globe2 aria-hidden="true" /><strong>Loading live rankings…</strong><span>Connecting to the global leaderboard.</span></div>}
                 {leaders === false && <div className="leader-empty"><Globe2 aria-hidden="true" /><strong>Rankings temporarily unavailable</strong><span>Live data could not be loaded. Please try again shortly.</span></div>}
                 {Array.isArray(leaders) && leaders.length === 0 && <div className="leader-empty"><Trophy aria-hidden="true" /><strong>No ranked matches yet</strong><span>Create an account and finish a battle to set the first real score.</span></div>}
               </div>
             </div>
-            <div className="your-rank"><span>{accountRank ? `#${accountRank.rank_position}` : '—'}</span><span className="leader-avatar">{accountName ? accountName[0].toUpperCase() : 'Y'}</span><strong>{accountRank ? `${accountRank.total_score.toLocaleString()} score · ${accountRank.matches_played.toLocaleString()} ranked matches` : accountName ? 'Loading your global rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
+            <div className="your-rank"><span>{accountRank ? `#${accountRank.rank_position}` : '—'}</span><span className="leader-avatar">{playerInitial(accountName, 'Y')}</span><strong>{accountRank ? `${accountRank.total_score.toLocaleString()} score · ${accountRank.matches_played.toLocaleString()} ranked matches` : accountName ? 'Loading your global rank' : 'Sign in to earn a global rank'}</strong><button onClick={accountName ? onAccountPlay : onCreate}>{accountName ? 'PLAY' : 'JOIN'} <ArrowRight /></button></div>
           </div>
         </section>
 
@@ -1830,30 +2033,59 @@ function Landing({ accountName, accountRank, authNotice, onNoticeClose, onlineCo
 }
 
 export default function App() {
-  const [screen, setScreen] = useState('landing');
+  const { data: session, isPending: authPending } = authClient.useSession();
+  const [screen, setScreen] = useState(() => window.location.pathname.startsWith('/admin') ? 'admin' : 'landing');
   const [modal, setModal] = useState(null);
   const [player, setPlayer] = useState('');
   const [opponent, setOpponent] = useState('');
   const [match, setMatch] = useState(null);
   const [result, setResult] = useState(null);
-  const [session, setSession] = useState(null);
-  const [authReady, setAuthReady] = useState(!supabase);
-  const [authNotice, setAuthNotice] = useState('');
+  const [adminAccess, setAdminAccess] = useState(false);
   const [guestDestination, setGuestDestination] = useState('matchmaking');
   const [confirmLeave, setConfirmLeave] = useState(false);
   // `partyCode` is the party you have actually joined/created. A code sitting
   // in the invite URL is only a *pending* invite until you accept it, so
   // browsing elsewhere never silently connects you to it.
   const [partyCode, setPartyCode] = useState('');
+  const authReady = !authPending;
   const { onlineCount, gamesPlayed, registeredUsers, leaders, accountRank } = useLiveStats(session?.user?.id);
   const partyLinkHandled = useRef(false);
   const pendingInvite = useRef(getPartyCodeFromUrl());
   const partyPlayerId = useRef(createPlayerId());
   const createdPartyCodeRef = useRef('');
   const screenRef = useRef(screen);
+
+  useEffect(() => {
+    return initializeAnalytics('/');
+  }, []);
+
   useEffect(() => {
     screenRef.current = screen;
+    const paths = {
+      landing: '/',
+      matchmaking: '/matchmaking',
+      party: '/party',
+      'party-game': '/party/game',
+      game: '/game',
+      results: '/results',
+    };
+    if (paths[screen]) trackPageView(paths[screen]);
   }, [screen]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (window.location.pathname.startsWith('/admin')) {
+        if (['game', 'matchmaking', 'party-game'].includes(screenRef.current)) {
+          window.history.replaceState(null, '', '/');
+          return;
+        }
+        setScreen('admin');
+      }
+      else if (screenRef.current === 'admin') setScreen('landing');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // The party connection lives here, not in the party screen, so finishing a
   // game or browsing other screens never disconnects anyone from the party.
@@ -1870,13 +2102,10 @@ export default function App() {
       setScreen('party-game');
     },
   });
-  const fromConfirmLink = useRef(
-    window.location.hash.includes('access_token') ||
-    Boolean(new URLSearchParams(window.location.search).get('code'))
-  );
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
   const handlePlayBot = useCallback(() => {
     const botMatch = createBotMatch(player);
+    trackAnalyticsEvent('bot_selected', { game_id: botMatch.id, mode: 'bot' });
     setMatch(botMatch);
     setOpponent(botMatch.opponent.name);
     setScreen('game');
@@ -1888,14 +2117,44 @@ export default function App() {
         // Counts toward the global matches total, but not ranked score.
         await recordBotMatch(match.id);
       } else {
-        matchStats = await recordMatchResult(match?.id, data.score, data.opponentScore);
+        const authorization = match?.getAuthorization?.();
+        matchStats = await recordMatchResult(
+          match?.id,
+          match?.playerId,
+          authorization?.ticket,
+          data.score,
+          data.opponentScore,
+        );
       }
     } catch (error) {
       console.error('Could not persist match result', error);
     }
     setResult({ ...data, matchStats, vsBot: Boolean(match?.isBot) });
+    trackAnalyticsEvent('result_viewed', {
+      game_id: match?.id,
+      mode: match?.isBot ? 'bot' : 'human',
+      score: data.score,
+      opponent_score: data.opponentScore,
+      persisted: match?.isBot || Boolean(matchStats),
+    });
     setScreen('results');
-  }, [match?.id, match?.isBot]);
+  }, [match]);
+
+  const handlePartyFinish = useCallback((data) => {
+    const mode = data.type === 'party-tournament' ? 'party_tournament' : 'party_team';
+    const analyticsGameId = match?.analyticsId || 'party-game';
+    trackAnalyticsEvent('game_completed', {
+      game_id: analyticsGameId,
+      attempt_id: `${analyticsGameId}:${match?.playerId}`,
+      mode,
+      score: data.score,
+      opponent_score: data.opponentScore,
+      outcome: data.outcome || (data.score >= data.opponentScore ? 'win' : 'loss'),
+    });
+    trackAnalyticsEvent('result_viewed', { game_id: analyticsGameId, mode, score: data.score, opponent_score: data.opponentScore });
+    setResult(data);
+    setScreen('results');
+  }, [match?.analyticsId, match?.playerId]);
 
   useEffect(() => {
     if (screen === 'game' || screen === 'party-game') return undefined;
@@ -1912,23 +2171,22 @@ export default function App() {
   }, [match?.id, opponent, player, screen]);
 
   useEffect(() => {
-    if (!supabase) return undefined;
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
-      setSession(nextSession);
-      setAuthReady(true);
-      if (event === 'SIGNED_IN' && fromConfirmLink.current) {
-        fromConfirmLink.current = false;
-        const name = nextSession?.user?.user_metadata?.battle_name
-          || nextSession?.user?.email?.split('@')[0]
-          || 'Player';
-        setAuthNotice(`Email confirmed! You're now signed in as ${name}.`);
-        window.history.replaceState(null, '', window.location.pathname);
-      }
-    });
-    return () => subscription.unsubscribe();
-  }, []);
+    let active = true;
+    if (!session?.user) {
+      setAdminAccess(false);
+      return undefined;
+    }
+    fetchAdminAccess()
+      .then((allowed) => {
+        if (active) setAdminAccess(allowed);
+      })
+      .catch(() => {
+        if (active) setAdminAccess(false);
+      });
+    return () => { active = false; };
+  }, [session?.user?.id]);
 
-  const accountName = session?.user?.user_metadata?.battle_name
+  const accountName = session?.user?.name
     || session?.user?.email?.split('@')[0]
     || '';
 
@@ -1950,16 +2208,19 @@ export default function App() {
   function createParty() {
     if (!hasRealtimeConfig) return;
     const code = createPartyCode();
+    trackAnalyticsEvent('party_created');
     createdPartyCodeRef.current = code;
     setPartyCode(code);
     window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
   }
   function joinParty(code) {
+    trackAnalyticsEvent('party_join_requested');
     createdPartyCodeRef.current = '';
     setPartyCode(code);
     window.history.replaceState(null, '', `${window.location.pathname}?party=${code}`);
   }
   function leaveParty() {
+    trackAnalyticsEvent('party_left');
     createdPartyCodeRef.current = '';
     setPartyCode('');
     setConfirmLeave(false);
@@ -1978,31 +2239,56 @@ export default function App() {
     setGuestDestination('matchmaking');
     setModal('guest');
   }
+  function cancelMatchmaking(details = {}) {
+    trackAnalyticsEvent('queue_abandoned', {
+      wait_seconds: Number(details.secondsWaiting) || 0,
+      status: details.status || 'cancelled',
+      reason: 'explicit_cancel',
+    });
+    home();
+  }
+  function openAdmin() {
+    window.history.pushState(null, '', '/admin');
+    setModal(null);
+    setScreen('admin');
+  }
+  function closeAdmin() {
+    window.history.replaceState(null, '', '/');
+    setModal(null);
+    setScreen('landing');
+  }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
-  function home() { setScreen('landing'); setResult(null); setMatch(null); setOpponent(''); }
-  async function logout() { await supabase?.auth.signOut(); home(); }
+  function home() {
+    if (window.location.pathname.startsWith('/admin')) window.history.replaceState(null, '', '/');
+    setScreen('landing');
+    setResult(null);
+    setMatch(null);
+    setOpponent('');
+  }
+  async function logout() { await authClient.signOut(); home(); }
 
   const inParty = Boolean(partyCode && player);
-  const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game';
+  const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game' && screen !== 'admin';
 
   let content;
-  if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={home} />;
+  if (screen === 'admin') content = <AdminDashboard brand={<Logo />} session={session} authPending={authPending} onBack={closeAdmin} onLogin={() => setModal('login')} onLogout={logout} />;
+  else if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={cancelMatchmaking} />;
   else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;
-  else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={(data) => { setResult(data); setScreen('results'); }} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
+  else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={handlePartyFinish} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
   else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen('party') : undefined} />;
-  else content = <>
-    <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} authNotice={authNotice} onNoticeClose={() => setAuthNotice('')} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />
-    {modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
+  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />;
+
+  const modalContent = modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
       const invite = guestDestination === 'party' ? pendingInvite.current : '';
       pendingInvite.current = '';
       if (invite.length === PARTY_CODE_LENGTH) joinParty(invite);
       start(name, guestDestination);
-    }} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />}
-  </>;
+    }} onAuthSuccess={() => setModal(null)} onSwitch={setModal} />;
 
   return <>
     {content}
+    {modalContent}
     {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} />}
     {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={() => setConfirmLeave(true)} />}
     {confirmLeave && <ConfirmDialog title="Leave the party?" message="Are you sure you want to leave the party? You'll need the invite link or code to rejoin." confirmLabel="Leave party" onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}

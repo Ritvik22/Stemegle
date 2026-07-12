@@ -8,23 +8,27 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:server": "node --env-file=.env.local --watch server/index.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "db:migrate": "node --env-file=.env.local scripts/apply-migrations.mjs",
-    "smoke:leaderboard": "node --env-file=.env.local scripts/leaderboard-smoke.mjs",
+    "test": "node --test server/*.test.mjs",
+    "test:analytics": "node --test server/analytics.test.mjs",
+    "db:migrate": "node scripts/apply-migrations.mjs",
+    "db:migrate:local": "node --env-file=.env.local scripts/apply-migrations.mjs",
+    "db:import-legacy": "node scripts/import-legacy-public.mjs",
+    "smoke:leaderboard": "node scripts/leaderboard-smoke.mjs",
     "check:questions": "node scripts/question-bank-check.mjs",
-    "smoke:realtime": "node --env-file=.env.local scripts/realtime-smoke.mjs"
+    "smoke:realtime": "node scripts/realtime-smoke.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.110.1",
     "@vitejs/plugin-react": "latest",
+    "better-auth": "^1.6.23",
+    "express": "^5.2.1",
     "lucide-react": "latest",
+    "pg": "^8.22.0",
     "react": "latest",
     "react-dom": "latest",
-    "vite": "latest"
-  },
-  "devDependencies": {
-    "postgres": "^3.4.7"
-  },
-  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+    "vite": "latest",
+    "ws": "^8.21.0"
+  }
 }
