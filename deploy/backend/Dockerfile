@@ -7,6 +7,7 @@ RUN npm ci --omit=dev
 
 COPY --chown=node:node server ./server
 COPY --chown=node:node src/data ./src/data
+COPY --chown=node:node src/lib/accountIdentity.js ./src/lib/accountIdentity.js
 
 ENV NODE_ENV=production
 ENV NODE_OPTIONS=--enable-source-maps

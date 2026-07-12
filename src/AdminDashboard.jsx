@@ -420,7 +420,7 @@ export default function AdminDashboard({ brand, session, authPending = false, on
                   return (
                     <Fragment key={user.user_id}>
                       <tr>
-                        <td><span className="user-avatar">{(user.battle_name || user.email || '?')[0].toUpperCase()}</span><span className="user-identity"><strong>{user.battle_name || 'Unnamed player'}</strong><small>{user.email}</small></span></td>
+                        <td><span className="user-avatar">{(user.battle_name || user.email || '?')[0].toUpperCase()}</span><span className="user-identity"><strong>{user.battle_name || 'Unnamed player'}</strong><small>{user.email || 'No email provided'}</small></span></td>
                         <td><strong>{formatDate(user.created_at)}</strong><small>Account active</small></td>
                         <td><span className="source-wrap"><button type="button" className="source-pill" title={user.referrer_url || 'No external referrer recorded'} aria-describedby={`referrer-${user.user_id}`} onClick={() => setExpandedUser(expanded ? null : user.user_id)}>{user.referral_source || 'Unknown'}</button><span className="referrer-tooltip" role="tooltip" id={`referrer-${user.user_id}`}>{user.referrer_url || 'No external referrer recorded'}</span></span><small>{user.campaign ? `Campaign: ${user.campaign}` : user.landing_path || 'Landing unknown'}</small></td>
                         <td><strong>{location}</strong><small>{user.timezone || 'Timezone unknown'}</small></td>
@@ -437,6 +437,7 @@ export default function AdminDashboard({ brand, session, authPending = false, on
                           <div><span>Gameplay</span><strong>{formatNumber(user.game_completions)} completed, {formatNumber(user.game_abandonments)} left</strong><small>{formatNumber(user.human_completions)} human / {formatNumber(user.bot_completions)} bot / {formatNumber(user.party_completions)} party</small></div>
                           <div><span>Ranked record</span><strong>{formatNumber(user.total_score)} score</strong><small>{formatNumber(user.wins)} wins / {formatNumber(user.losses)} losses / {formatNumber(user.ranked_matches)} ranked</small></div>
                           <div><span>Account activity</span><strong>Last sign-in {formatDate(user.last_sign_in_at, true)}</strong><small>First seen {formatDate(user.first_seen_at, true)} / last screen {user.last_path || 'Unknown'}</small></div>
+                          <div><span>Contact</span><strong>{user.email || 'No email provided'}</strong><small>{user.contact_email ? 'Optional contact email, not yet verified' : user.email ? 'Account email' : 'Battle-name login only'}</small></div>
                         </div></td></tr>
                       )}
                     </Fragment>

@@ -1,5 +1,6 @@
 import { betterAuth } from 'better-auth';
 import { pool } from './db.mjs';
+import { battleNameToAccountEmail } from '../src/lib/accountIdentity.js';
 
 const production = process.env.NODE_ENV === 'production';
 const baseURL = process.env.BETTER_AUTH_URL || 'http://localhost:5173';
@@ -35,6 +36,13 @@ export function normalizeBattleName(value) {
   return name.length >= 2 && name.length <= 30 ? name : '';
 }
 
+export function normalizeContactEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  if (!email) return null;
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+  return email;
+}
+
 export const auth = betterAuth({
   appName: 'Stemegle',
   baseURL,
@@ -65,6 +73,13 @@ export const auth = betterAuth({
         required: true,
         defaultValue: 'user',
         input: false,
+      },
+      contactEmail: {
+        type: 'string',
+        required: false,
+        input: true,
+        returned: false,
+        fieldName: 'contact_email',
       },
     },
   },
@@ -109,7 +124,10 @@ export const auth = betterAuth({
       create: {
         async before(user) {
           const name = normalizeBattleName(user.name);
-          return name ? { data: { ...user, name } } : false;
+          const email = battleNameToAccountEmail(name);
+          const contactEmail = normalizeContactEmail(user.contactEmail);
+          if (!name || !email || contactEmail === false) return false;
+          return { data: { ...user, name, email, contactEmail } };
         },
       },
       update: {

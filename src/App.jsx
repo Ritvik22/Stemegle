@@ -37,6 +37,7 @@ import {
   trackAnalyticsEvent,
   trackPageView,
 } from './lib/analytics';
+import { battleNameToAccountEmail, loginIdentityToEmail } from './lib/accountIdentity';
 import { authClient, fetchAdminAccess, fetchStats, recordBotMatch, recordMatchResult } from './lib/api';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import { getQuestionsForMatch } from './data/questions';
@@ -512,7 +513,7 @@ function BattleCard() {
 function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescription, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
   const dialogRef = useDialogA11y(onClose);
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -524,8 +525,8 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
   const valid = isGuest
     ? name.trim().length >= 2
     : isLogin
-      ? email.includes('@') && password.length > 0
-      : name.trim().length >= 2 && email.includes('@') && passwordStrong && password === confirmPassword;
+      ? Boolean(loginIdentityToEmail(name)) && password.length > 0
+      : Boolean(battleNameToAccountEmail(name)) && passwordStrong && password === confirmPassword;
 
   async function submit(event) {
     event.preventDefault();
@@ -541,10 +542,10 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
     try {
       if (isLogin) {
         const { error: signInError } = await authClient.signIn.email({
-          email: email.trim().toLowerCase(),
+          email: loginIdentityToEmail(name),
           password,
         });
-        if (signInError) throw new Error(signInError.message || 'The email or password was not accepted.');
+        if (signInError) throw new Error(signInError.message || 'The battle name or password was not accepted.');
         await trackAnalyticsEvent('login_succeeded', { status: 'authenticated' });
         onAuthSuccess();
         return;
@@ -553,10 +554,17 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
       trackAnalyticsEvent('signup_started');
       const { error: signUpError } = await authClient.signUp.email({
         name: name.trim(),
-        email: email.trim().toLowerCase(),
+        email: battleNameToAccountEmail(name),
         password,
+        contactEmail: contactEmail.trim().toLowerCase() || undefined,
       });
-      if (signUpError) throw new Error(signUpError.message || 'The account could not be created.');
+      if (signUpError) {
+        const message = signUpError.message || '';
+        if (/already|exists|unique/i.test(message)) {
+          throw new Error('That battle name is already taken. Try another, or log in instead.');
+        }
+        throw new Error(message || 'The account could not be created.');
+      }
       // Better Auth has set the secure session cookie at this point, so this
       // event can associate the first-touch visitor journey with the new user.
       await trackAnalyticsEvent('signup_succeeded', { status: 'authenticated' });
@@ -570,7 +578,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
 
   function switchMode(nextMode) {
     setName('');
-    setEmail('');
+    setContactEmail('');
     setPassword('');
     setConfirmPassword('');
     setShowPassword(false);
@@ -590,8 +598,13 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         <h2 id="entry-title">{title}</h2>
         <p>{isGuest ? guestDescription || 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
         <form onSubmit={submit}>
-          {!isLogin && <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete="nickname" /></label>}
-          {!isGuest && <label>Email address<input autoFocus={isLogin} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" /></label>}
+          <label>{isLogin ? 'Battle name or email' : 'Battle name'}<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={isLogin ? 320 : 18} autoComplete={isLogin ? 'username' : 'nickname'} /></label>
+          {!isGuest && !isLogin && (
+            <label>
+              <span className="label-row">Email address <small>Optional</small></span>
+              <input type="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" />
+            </label>
+          )}
           {!isGuest && (
             <label>Password
               <span className="password-field">

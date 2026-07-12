@@ -66,18 +66,22 @@ The admin endpoints verify the same HttpOnly session and require
 
 ## Admin Bootstrap
 
-Create the intended account normally, then assign its role from the trusted
-server console and sign in again afterward:
+Create the intended account normally, verify its identity out of band, then find
+the immutable account ID from the trusted server console:
 
 ```sql
+select id, name, email, contact_email
+from app_users
+where lower(name) = lower('Known battle name');
+
 update app_users
 set role = 'admin', updated_at = now()
-where lower(email) = lower('you@example.com');
+where id = 'verified-account-uuid';
 ```
 
-Never grant access through an unverified email allowlist: before an address is
-verified, another person could register it first. The database role is the
-authorization boundary; hiding the navigation link is not.
+Never grant access through the optional contact email alone because it is not
+verified. The immutable account ID and database role are the authorization
+boundary; hiding the navigation link is not.
 
 ## Cloudflare
 

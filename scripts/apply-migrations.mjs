@@ -46,7 +46,7 @@ try {
   `);
 
   const filenames = (await readdir(migrationsDirectory))
-    .filter((filename) => filename.endsWith('.sql'))
+    .filter((filename) => /^\d{3}_[A-Za-z0-9_-]+\.sql$/.test(filename))
     .sort((left, right) => left.localeCompare(right));
 
   for (const filename of filenames) {
@@ -67,6 +67,7 @@ try {
 
     await client.query('begin');
     try {
+      console.log(`Applying ${filename}`);
       await client.query(contents);
       await client.query(
         'insert into stemegle_schema_migrations (filename, checksum) values ($1, $2)',

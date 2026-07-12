@@ -157,7 +157,7 @@ end-to-end health check fails.
 
 ```dotenv
 DEPLOY_REPO=Ritvik22/Stemegle
-DEPLOY_BRANCH=codex/self-hosted-backend
+DEPLOY_BRANCH=main
 GITHUB_WEBHOOK_SECRET=generated-webhook-secret
 ```
 

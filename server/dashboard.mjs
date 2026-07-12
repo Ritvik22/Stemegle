@@ -117,7 +117,11 @@ export async function getAnalyticsDashboard(requestedDays = 30) {
     user_rows as (
       select
         users.id as user_id,
-        users.email,
+        case
+          when right(users.email, 21) = '@players.stemegle.com' then users.contact_email
+          else coalesce(users.contact_email, users.email)
+        end as email,
+        users.contact_email,
         users.name as battle_name,
         users.created_at,
         case when users.email_verified then users.created_at else null end as email_confirmed_at,

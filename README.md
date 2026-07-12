@@ -5,10 +5,12 @@ guest, match with another online player, answer timed questions, form parties,
 and compete for score, streaks, and a global rank.
 
 This branch is fully self-hosted. PostgreSQL stores accounts, sessions,
-leaderboards, matches, and first-party analytics. Better Auth handles
-email/password accounts with same-origin HttpOnly cookies, and Stemegle's own
-WebSocket relay powers presence and multiplayer events. There is no Supabase
-runtime, SDK, environment variable, or hosted service dependency.
+leaderboards, matches, and first-party analytics. Better Auth handles password
+accounts with same-origin HttpOnly cookies. New players log in with their battle
+name and may add an optional contact email; existing email-based accounts remain
+compatible. Stemegle's own WebSocket relay powers presence and multiplayer
+events. There is no Supabase runtime, SDK, environment variable, or hosted
+service dependency.
 
 Ranked human results require server-issued match tickets bound to two distinct
 signed-in accounts and both players' realtime finish events. Guest matches stay
@@ -101,6 +103,10 @@ sessions, confirmations, private match results, and analytics require owner-leve
 database access and cannot be recovered from a public project key. Consequently,
 players must create a new password on this branch; public historical ranks remain
 visible as unclaimed legacy rows rather than being attached by battle name.
+
+Contact email is optional, stored separately from the internal battle-name login
+identifier, and is not treated as verified. Password recovery remains unavailable
+until the mail integration below is configured.
 
 Self-service password-reset email still needs a real SMTP or transactional-mail
 credential. It is not routed through the former provider or an insecure log-link
