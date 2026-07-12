@@ -513,6 +513,7 @@ function battleNameToEmail(name) {
 function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescription, onClose, onGuestStart, onAuthSuccess, onSwitch }) {
   const dialogRef = useDialogA11y(onClose);
   const [name, setName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -566,7 +567,10 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         email: derivedEmail,
         password,
         options: {
-          data: { battle_name: name.trim() },
+          data: {
+            battle_name: name.trim(),
+            ...(contactEmail.trim() ? { contact_email: contactEmail.trim().toLowerCase() } : {}),
+          },
           emailRedirectTo: AUTH_REDIRECT_URL,
         },
       });
@@ -594,6 +598,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
 
   function switchMode(nextMode) {
     setName('');
+    setContactEmail('');
     setPassword('');
     setConfirmPassword('');
     setShowPassword(false);
@@ -615,6 +620,12 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         <p>{isGuest ? guestDescription || 'No account, no fuss. Pick a name and jump straight into a match.' : isLogin ? 'Log in securely to continue with your saved identity.' : 'Protect your account with a password and keep your player identity across devices.'}</p>
         <form onSubmit={submit}>
           <label>Battle name<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ProtonPilot" maxLength={18} autoComplete={isLogin ? 'username' : 'nickname'} /></label>
+          {!isGuest && !isLogin && (
+            <label>
+              <span className="label-row">Email address <small>Optional</small></span>
+              <input type="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" />
+            </label>
+          )}
           {!isGuest && (
             <label>Password
               <span className="password-field">
