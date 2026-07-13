@@ -178,23 +178,44 @@ footer { border-top: 1px solid var(--line); min-height: 100px; max-width: 1180px
 .chat-fab{position:fixed;right:20px;bottom:20px;z-index:110;display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:#fff;border:1.5px solid #33493f;border-radius:999px;padding:11px 17px;font:800 13px 'Manrope';box-shadow:4px 4px 0 var(--green);cursor:pointer;transition:transform .15s,box-shadow .15s}
 .chat-fab:hover{transform:translate(2px,2px);box-shadow:2px 2px 0 var(--green)}
 .chat-unread{background:#ff5a4e;color:#fff;font:800 10px 'Manrope';min-width:18px;height:18px;border-radius:999px;display:grid;place-items:center;font-style:normal;padding:0 4px}
-.chat-dock{position:fixed;right:20px;bottom:20px;z-index:110;width:min(320px,calc(100vw - 28px));background:#12211b;border:1px solid #2d473c;border-radius:16px;display:flex;flex-direction:column;box-shadow:0 18px 50px #0006;overflow:hidden}
-.chat-head{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:#172c23;border-bottom:1px solid #2d473c;color:#fff}
+.chat-dock{position:fixed;right:20px;bottom:20px;z-index:110;width:min(320px,calc(100vw - 28px));max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px);background:#12211b;border:1px solid #2d473c;border-radius:16px;display:flex;flex-direction:column;box-shadow:0 18px 50px #0006;overflow:hidden}
+.chat-head{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:#172c23;border-bottom:1px solid #2d473c;color:#fff}
 .chat-head strong{display:inline-flex;align-items:center;gap:7px;font:800 12px 'Manrope';letter-spacing:.5px}
 .chat-head button{background:none;border:0;color:#8da097;cursor:pointer;display:grid;place-items:center;padding:2px}
-.chat-list{height:230px;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.chat-list{height:auto;min-height:64px;flex:1 1 230px;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
 .chat-empty{color:#71867c;font-size:12px;text-align:center;margin:auto;padding:0 14px;line-height:1.5}
 .chat-msg{max-width:85%;background:#1c3229;border:1px solid #2d473c;border-radius:11px 11px 11px 3px;padding:7px 11px;align-self:flex-start}
 .chat-msg.own{align-self:flex-end;background:#26411c;border-color:#47692f;border-radius:11px 11px 3px 11px}
 .chat-msg small{display:block;color:#8fd06a;font:800 9px 'Manrope';letter-spacing:.8px;margin-bottom:2px;text-transform:uppercase}
 .chat-msg.own small{color:var(--green)}
 .chat-msg span{color:#e7f0ea;font-size:13px;line-height:1.4;word-break:break-word;white-space:pre-wrap}
-.chat-input{display:flex;gap:8px;padding:10px;border-top:1px solid #2d473c}
+.chat-msg .chat-msg-head{display:flex;align-items:center;justify-content:space-between;gap:8px;white-space:normal}
+.chat-msg-head small{margin:0}
+.chat-safety-actions{display:flex;align-items:center;gap:2px;white-space:normal!important}
+.chat-safety-actions button{width:25px;height:25px;border:0;border-radius:5px;background:transparent;color:#9bb0a6;display:grid;place-items:center;cursor:pointer;padding:0}
+.chat-safety-actions button:hover:not(:disabled){background:#29453a;color:#fff}
+.chat-safety-actions button:disabled{opacity:.35;cursor:not-allowed}
+.chat-safety-actions svg{width:13px;height:13px}
+.chat-report-form{margin:8px -4px -2px;padding:8px;background:#0d1a14;border:1px solid #3b5549;border-radius:6px;display:grid;gap:8px}
+.chat-report-form label{color:#b9cbc2;font:700 10px 'Manrope'}
+.chat-report-form select{display:block;width:100%;margin-top:5px;border:1px solid #466054;border-radius:5px;background:#172820;color:#fff;padding:7px;font-size:11px}
+.chat-report-form>span{display:flex;justify-content:flex-end;gap:6px;white-space:normal}
+.chat-report-form button{border:1px solid #466054;border-radius:5px;background:transparent;color:#c9d8d0;padding:6px 8px;font:750 10px 'Manrope';display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+.chat-report-form button[type='submit']{background:var(--green);border-color:var(--green);color:var(--ink)}
+.chat-report-form button:disabled{opacity:.5;cursor:not-allowed}
+.chat-report-form svg{width:12px;height:12px}
+.chat-safety-notice{flex:0 1 auto;border-top:1px solid #2d473c;background:#15271f;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;gap:8px;color:#b8cbc1;font-size:10px;line-height:1.35}
+.chat-safety-notice button{flex-shrink:0;border:0;background:transparent;color:var(--green);font:800 10px 'Manrope';display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+.chat-safety-notice svg{width:12px;height:12px}
+.chat-muted-manager{flex:0 1 auto;min-height:0;overflow:hidden;border-top:1px solid #2d473c;background:#101f18;color:#c2d2ca;font-size:10px}
+.chat-muted-manager summary{min-height:34px;padding:8px 10px;display:flex;align-items:center;gap:6px;color:#b9cbc2;font-weight:800;cursor:pointer;list-style:none}.chat-muted-manager summary::-webkit-details-marker{display:none}.chat-muted-manager summary svg{width:13px;height:13px;color:var(--green)}
+.chat-muted-manager>div{max-height:min(130px,20dvh);overflow-y:auto;padding:0 10px 8px}.chat-muted-manager>div>span{min-height:32px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid #294036}.chat-muted-manager b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat-muted-manager button{flex:0 0 auto;border:0;background:transparent;color:var(--green);display:inline-flex;align-items:center;gap:4px;padding:5px;font-size:10px;font-weight:800}.chat-muted-manager button svg{width:12px;height:12px}
+.chat-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid #2d473c}
 .chat-input input{flex:1;min-width:0;background:#0d1a14;border:1px solid #2d473c;border-radius:9px;color:#fff;padding:9px 11px;font-size:13px}
 .chat-input input::placeholder{color:#5e7168}
 .chat-input button{background:var(--green);border:0;border-radius:9px;width:38px;color:var(--ink);display:grid;place-items:center;cursor:pointer}
 .chat-input button:disabled{opacity:.4;cursor:not-allowed}
-@media (max-width:680px){.chat-fab,.chat-dock{right:14px;bottom:14px}.chat-list{height:170px}}
+@media (max-width:680px){.chat-fab,.chat-dock{right:14px;bottom:14px}.chat-dock{max-height:calc(100vh - 28px);max-height:calc(100dvh - 28px)}.chat-list{flex-basis:170px}}
 
 /* --- Accessibility (WCAG 2.1 AA) --- */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}

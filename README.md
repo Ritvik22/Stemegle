@@ -16,6 +16,19 @@ Ranked human results require server-issued match tickets bound to two distinct
 signed-in accounts and both players' realtime finish events. Guest matches stay
 playable but do not alter the authenticated leaderboard.
 
+## Progression Demo
+
+The `codex/player-progression-demo` branch adds an authenticated player hub,
+server-authoritative competitive ratings, subject-and-difficulty learning
+lessons, mastery tracking, daily goals, achievements, and recent human and bot
+match history. Ranked matchmaking uses trusted account ratings and gradually
+widens its search range while a player waits.
+
+Chat includes per-device mute controls and signed-in reporting. Report evidence
+is issued by the realtime server, so clients cannot rewrite the message,
+speaker, or account being reported. Admins can review report evidence and update
+its moderation status alongside the existing first-party analytics dashboard.
+
 ## Stack
 
 - React 19 and Vite
@@ -89,7 +102,13 @@ npm run check:questions
 npm run build
 STEMEGLE_URL=http://127.0.0.1:8097 npm run smoke:leaderboard
 STEMEGLE_URL=http://127.0.0.1:8097 npm run smoke:realtime
+STEMEGLE_URL=http://127.0.0.1:8097 npm run smoke:progression
 ```
+
+The progression smoke creates two uniquely named test accounts and exercises
+authenticated learning, bot history, verified party-chat reporting, and one
+complete ranked match. Set `STEMEGLE_ORIGIN` when the URL being tested is an
+internal backend address whose configured public origin is different.
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for production rollout and recovery, and
 [ANALYTICS.md](./ANALYTICS.md) for the admin dashboard, collection policy, and

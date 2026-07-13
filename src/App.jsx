@@ -3,6 +3,7 @@ import {
   ArrowRight,
   Atom,
   BarChart3,
+  BookOpen,
   Bolt,
   BrainCircuit,
   Check,
@@ -12,9 +13,12 @@ import {
   Crown,
   Eye,
   EyeOff,
+  Flag,
   FlaskConical,
+  Gauge,
   Globe2,
   Lock,
+  LayoutDashboard,
   Copy,
   GitBranch,
   Medal,
@@ -26,19 +30,34 @@ import {
   Shuffle,
   Sparkles,
   Swords,
+  ShieldCheck,
   Trophy,
   Users,
+  Volume2,
+  VolumeX,
   X,
   Zap,
 } from 'lucide-react';
 import AdminDashboard from './AdminDashboard';
+import LearningMode from './LearningMode';
+import PlayerHub from './PlayerHub';
 import {
   initializeAnalytics,
   trackAnalyticsEvent,
   trackPageView,
 } from './lib/analytics';
 import { battleNameToAccountEmail, loginIdentityToEmail } from './lib/accountIdentity';
-import { authClient, fetchAdminAccess, fetchStats, recordBotMatch, recordMatchResult } from './lib/api';
+import {
+  authClient,
+  fetchAdminAccess,
+  fetchPlayerHub,
+  fetchStats,
+  recordBotMatch,
+  recordChatReport,
+  recordLearningAttempt,
+  recordMatchResult,
+} from './lib/api';
+import { matchmakingRatingWindow, pairRatedPlayers } from './lib/matchmaking';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import { getQuestionsForMatch } from './data/questions';
 
@@ -372,38 +391,115 @@ function useDialogA11y(onClose) {
   return dialogRef;
 }
 
-function Logo() {
-  return <a className="logo" href="#top" aria-label="Stemegle home"><span className="logo-mark"><Atom size={22} /></span><span>stemegle</span></a>;
+function Logo({ onHome }) {
+  return (
+    <a
+      className="logo"
+      href="/"
+      aria-label="Stemegle home"
+      onClick={onHome ? (event) => {
+        event.preventDefault();
+        onHome();
+      } : undefined}
+    >
+      <span className="logo-mark"><Atom size={22} /></span><span>stemegle</span>
+    </a>
+  );
 }
 
 const CHAT_MAX_LENGTH = 240;
 const CHAT_HISTORY_CAP = 100;
+const MUTED_CHAT_KEY = 'stemegle_muted_chat_players';
 
-// Appends a chat message, deduping by id — messages are appended optimistically
-// on send AND echoed back by the channel (broadcast self: true), so the id
-// check keeps exactly one copy.
-function appendChatMessage(current, msg) {
-  if (!msg?.id || typeof msg.text !== 'string' || !msg.text.trim()) return current;
-  if (current.some((existing) => existing.id === msg.id)) return current;
-  return [...current.slice(-(CHAT_HISTORY_CAP - 1)), { ...msg, text: msg.text.slice(0, CHAT_MAX_LENGTH) }];
+function readMutedChatPlayers() {
+  try {
+    const value = JSON.parse(localStorage.getItem(MUTED_CHAT_KEY) || '[]');
+    if (!Array.isArray(value)) return new Map();
+    return new Map(value.flatMap((entry) => {
+      if (typeof entry === 'string') return [[entry, 'Player']];
+      if (!entry || typeof entry.id !== 'string') return [];
+      return [[entry.id, typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : 'Player']];
+    }));
+  } catch {
+    return new Map();
+  }
 }
 
-function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
+function saveMutedChatPlayers(players) {
+  try {
+    const stored = [...players.entries()].slice(-100).map(([id, name]) => ({ id, name }));
+    localStorage.setItem(MUTED_CHAT_KEY, JSON.stringify(stored));
+  } catch {
+    // Muting still works for this page when storage is unavailable.
+  }
+}
+
+// Reconcile the optimistic client id with the canonical server id. Remote
+// messages only dedupe on their server id, so a sender cannot hide later chat
+// by deliberately reusing a client id.
+function appendChatMessage(current, msg) {
+  if (!msg?.id || typeof msg.text !== 'string' || !msg.text.trim()) return current;
+  const existingIndex = current.findIndex((existing) => (
+    existing.id === msg.id
+    || (msg.clientMessageId
+      && existing.pending === true
+      && existing.id === msg.clientMessageId
+      && existing.playerId === msg.playerId)
+  ));
+  if (existingIndex >= 0) {
+    const next = [...current];
+    next[existingIndex] = {
+      ...current[existingIndex],
+      ...msg,
+      pending: false,
+      text: msg.text.slice(0, CHAT_MAX_LENGTH),
+    };
+    return next;
+  }
+  return [...current.slice(-(CHAT_HISTORY_CAP - 1)), {
+    ...msg,
+    pending: msg.pending === true,
+    text: msg.text.slice(0, CHAT_MAX_LENGTH),
+  }];
+}
+
+function ChatDock({ title, scopeLabel, channelId, messages, onSend, onReport, selfId }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const [unread, setUnread] = useState(0);
+  const [mutedPlayers, setMutedPlayers] = useState(readMutedChatPlayers);
+  const [reportingId, setReportingId] = useState('');
+  const [reportReason, setReportReason] = useState('harassment');
+  const [safetyNotice, setSafetyNotice] = useState('');
+  const [reportPending, setReportPending] = useState(false);
   const listRef = useRef(null);
-  const seenCount = useRef(messages.length);
+  const receiptId = (message) => (
+    message.playerId === selfId && message.clientMessageId
+      ? message.clientMessageId
+      : message.id
+  );
+  const seenMessageIds = useRef(new Set(messages.map(receiptId)));
+  const visibleMessages = messages.filter((message) => (
+    message.playerId === selfId || !mutedPlayers.has(message.playerId)
+  ));
+  const mutedNames = [...mutedPlayers.entries()];
 
   useEffect(() => {
+    const unseen = messages.filter((message) => !seenMessageIds.current.has(receiptId(message)));
+    const visibleUnseen = unseen.filter((message) => (
+      message.playerId === selfId || !mutedPlayers.has(message.playerId)
+    ));
     if (open) {
       setUnread(0);
       if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-    } else if (messages.length > seenCount.current) {
-      setUnread((count) => count + (messages.length - seenCount.current));
+    } else if (visibleUnseen.length) {
+      setUnread((count) => count + visibleUnseen.length);
     }
-    seenCount.current = messages.length;
-  }, [messages, open]);
+    unseen.forEach((message) => seenMessageIds.current.add(receiptId(message)));
+    if (seenMessageIds.current.size > CHAT_HISTORY_CAP * 2) {
+      seenMessageIds.current = new Set(messages.map(receiptId));
+    }
+  }, [messages, mutedPlayers, open, selfId]);
 
   function submit(event) {
     event.preventDefault();
@@ -411,6 +507,47 @@ function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
     if (!trimmed) return;
     onSend(trimmed);
     setText('');
+  }
+
+  function mutePlayer(message) {
+    const next = new Map(mutedPlayers);
+    next.delete(message.playerId);
+    next.set(message.playerId, message.name || 'Player');
+    setMutedPlayers(next);
+    saveMutedChatPlayers(next);
+    setReportingId('');
+    setSafetyNotice(`${message.name || 'Player'} is muted. Their chat messages are hidden.`);
+  }
+
+  function unmutePlayer(playerId, name) {
+    const next = new Map(mutedPlayers);
+    next.delete(playerId);
+    setMutedPlayers(next);
+    saveMutedChatPlayers(next);
+    setSafetyNotice(`${name || 'Player'} is no longer muted.`);
+  }
+
+  async function submitReport(event, message) {
+    event.preventDefault();
+    if (!onReport || reportPending) return;
+    setReportPending(true);
+    try {
+      await onReport({
+        messageId: message.id,
+        targetPlayerId: message.playerId,
+        targetName: message.name,
+        channel: channelId,
+        reason: reportReason,
+        excerpt: message.text,
+        reportToken: message.reportToken,
+      });
+      setSafetyNotice('Report sent. Thank you for helping keep Stemegle safe.');
+      setReportingId('');
+    } catch (reportError) {
+      setSafetyNotice(reportError?.message || 'The report could not be sent. Please try again.');
+    } finally {
+      setReportPending(false);
+    }
   }
 
   if (!open) {
@@ -429,13 +566,59 @@ function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
       </div>
       <div className="chat-list" ref={listRef} role="log" aria-live="polite">
         {messages.length === 0 && <p className="chat-empty">Say hi — only {scopeLabel} can see these messages.</p>}
-        {messages.map((msg) => (
+        {messages.length > 0 && visibleMessages.length === 0 && <p className="chat-empty">Messages from muted players are hidden.</p>}
+        {visibleMessages.map((msg) => (
           <div key={msg.id} className={msg.playerId === selfId ? 'chat-msg own' : 'chat-msg'}>
-            <small>{msg.playerId === selfId ? 'You' : msg.name}</small>
+            <span className="chat-msg-head">
+              <small>{msg.playerId === selfId ? 'You' : msg.name}</small>
+              {msg.playerId !== selfId && (
+                <span className="chat-safety-actions">
+                  <button type="button" onClick={() => mutePlayer(msg)} title={`Mute ${msg.name || 'player'}`} aria-label={`Mute ${msg.name || 'player'}`}><VolumeX /></button>
+                  <button
+                    type="button"
+                    onClick={() => setReportingId(reportingId === msg.id ? '' : msg.id)}
+                    title={!onReport ? 'Sign in to report messages' : msg.reportToken ? 'Report message' : 'Waiting for verified message evidence'}
+                    aria-label={!onReport ? `Sign in to report message from ${msg.name || 'player'}` : msg.reportToken ? `Report message from ${msg.name || 'player'}` : `Report for ${msg.name || 'player'} will be available once the message is verified`}
+                    disabled={!onReport || !msg.reportToken}
+                  ><Flag /></button>
+                </span>
+              )}
+            </span>
             <span>{msg.text}</span>
+            {reportingId === msg.id && (
+              <form className="chat-report-form" onSubmit={(event) => submitReport(event, msg)}>
+                <label>Reason
+                  <select value={reportReason} onChange={(event) => setReportReason(event.target.value)}>
+                    <option value="harassment">Harassment</option>
+                    <option value="hate_speech">Hate speech</option>
+                    <option value="sexual_content">Sexual content</option>
+                    <option value="spam">Spam</option>
+                    <option value="cheating">Cheating</option>
+                    <option value="personal_information">Personal information</option>
+                    <option value="other">Other</option>
+                  </select>
+                </label>
+                <span><button type="button" onClick={() => setReportingId('')}>Cancel</button><button type="submit" disabled={reportPending}><ShieldCheck /> {reportPending ? 'Sending' : 'Send report'}</button></span>
+              </form>
+            )}
           </div>
         ))}
       </div>
+      {safetyNotice && (
+        <div className="chat-safety-notice" role="status">
+          <span>{safetyNotice}</span>
+        </div>
+      )}
+      {mutedNames.length > 0 && (
+        <details className="chat-muted-manager">
+          <summary><VolumeX aria-hidden="true" /> Manage muted players ({mutedNames.length})</summary>
+          <div>
+            {mutedNames.map(([playerId, name]) => (
+              <span key={playerId}><b>{name}</b><button type="button" aria-label={`Unmute ${name}`} onClick={() => unmutePlayer(playerId, name)}><Volume2 aria-hidden="true" /> Unmute</button></span>
+            ))}
+          </div>
+        </details>
+      )}
       <form className="chat-input" onSubmit={submit}>
         <input value={text} onChange={(event) => setText(event.target.value)} placeholder="Type a message…" maxLength={CHAT_MAX_LENGTH} aria-label="Chat message" />
         <button type="submit" disabled={!text.trim()} aria-label="Send message"><ArrowRight size={16} /></button>
@@ -456,7 +639,7 @@ function CloudflareBadge() {
   );
 }
 
-function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onHub, onLearn, onLogin, onLogout, onAccountPlay }) {
   const [open, setOpen] = useState(false);
   return (
     <header className="site-header">
@@ -465,9 +648,11 @@ function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin
         <a href="#how" onClick={() => setOpen(false)}>How it works</a>
         <a href="#party" onClick={() => setOpen(false)}>Party</a>
         <a href="#leaderboard" onClick={() => setOpen(false)}>Leaderboard</a>
+        <button className="nav-login" onClick={onLearn}><BookOpen size={15} /> Learn</button>
         {accountName ? (
           <>
             <span className="account-pill"><i>{playerInitial(accountName)}</i><span><small>SIGNED IN</small>{accountName}</span></span>
+            <button className="nav-login" onClick={onHub}><LayoutDashboard size={15} /> Player hub</button>
             {canViewAdmin && <button className="nav-login" onClick={onAdmin}><BarChart3 size={15} /> Analytics</button>}
             <button className="nav-login" onClick={onLogout}>Log out</button>
             <button className="button button-small" onClick={onAccountPlay}>Play now <ArrowRight size={15} /></button>
@@ -625,7 +810,7 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
   );
 }
 
-function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
+function Matchmaking({ name, rating = 1200, ratingGames = 0, onMatched, onPlayBot, onCancel }) {
   const [secondsWaiting, setSecondsWaiting] = useState(0);
   const [opponentOnline, setOpponentOnline] = useState(false);
   const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'configuration-error');
@@ -697,7 +882,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
           channel,
           events,
           playerId: playerId.current,
-          opponent: { id: opponent.playerId, name: opponent.name },
+          opponent: { id: opponent.playerId, name: opponent.name, rating: opponent.rating },
           startsAt: payload.startsAt,
           getAuthorization: () => channel.matchAuthorization(),
           // Host is the single source of truth for the question set so both
@@ -729,7 +914,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
         })
         .subscribe(async (subscriptionStatus) => {
           if (subscriptionStatus === 'SUBSCRIBED' && attempt?.channel === channel) {
-            await channel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+            await channel.track({ playerId: playerId.current, name, rating, ratingGames, joinedAt: Date.now() });
             // Handshake heartbeat: announce readiness until the match starts, so a
             // missed broadcast is always retried rather than hanging both players.
             attempt.intervals.push(setInterval(() => {
@@ -761,12 +946,21 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
 
     const pairFromLobby = () => {
       if (!active || joinedMatch || !lobbyChannel) return;
-      const players = getPresencePlayers(lobbyChannel)
-        .sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
-      const ownIndex = players.findIndex((candidate) => candidate.playerId === playerId.current);
-      if (ownIndex === -1) return;
-      const partnerIndex = ownIndex % 2 === 0 ? ownIndex + 1 : ownIndex - 1;
-      const partner = players[partnerIndex];
+      const players = getPresencePlayers(lobbyChannel);
+      const ownPresence = players.find((candidate) => candidate.playerId === playerId.current);
+      if (ownPresence?.rankedEligible === false) {
+        clearAttempt();
+        const limit = Number(ownPresence.rankedMatchLimit) || 100;
+        setOpponentOnline(false);
+        setStatus('daily-limit');
+        setError(`You have completed today's ${limit} ranked matches. Practice against a bot now, then return after the daily reset.`);
+        return;
+      }
+      const pairing = pairRatedPlayers(players, Date.now());
+      const ownPair = pairing.pairs.find((pair) => (
+        pair.some((candidate) => candidate.playerId === playerId.current)
+      ));
+      const partner = ownPair?.find((candidate) => candidate.playerId !== playerId.current);
 
       if (!partner) {
         // Nobody to pair with right now; abandon any half-open attempt.
@@ -792,7 +986,7 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
       .subscribe(async (subscriptionStatus) => {
         if (subscriptionStatus === 'SUBSCRIBED') {
           setStatus('waiting');
-          await lobbyChannel.track({ playerId: playerId.current, name, joinedAt: Date.now() });
+          await lobbyChannel.track({ playerId: playerId.current, name, rating, ratingGames, joinedAt: Date.now() });
           if (!queueConnectedTracked.current) {
             queueConnectedTracked.current = true;
             trackAnalyticsEvent('queue_connected');
@@ -813,35 +1007,45 @@ function Matchmaking({ name, onMatched, onPlayBot, onCancel }) {
       }
       if (attempt && !joinedMatch) clearAttempt();
     };
-  }, [name, onMatched]);
+  }, [name, onMatched, rating, ratingGames]);
 
-  const progress = opponentOnline ? 100 : Math.min(18 + secondsWaiting * 3, 76);
+  const dailyLimitReached = status === 'daily-limit';
+  const progress = opponentOnline || dailyLimitReached ? 100 : Math.min(18 + secondsWaiting * 3, 76);
   const connecting = status === 'connecting';
   const hasError = status === 'error' || status === 'configuration-error';
+  const ratingWindow = matchmakingRatingWindow(Date.now() - secondsWaiting * 1000);
   // Offer a practice match against the bot once the wait is long enough, or
   // right away if the live lobby is unreachable.
-  const offerBot = !opponentOnline && (secondsWaiting >= 10 || hasError);
+  const offerBot = !opponentOnline && (secondsWaiting >= 10 || hasError || dailyLimitReached);
 
   return (
     <main className="game-shell matchmaking-screen">
       <Logo />
       <div className="radar" aria-hidden="true"><span className="radar-ring r1" /><span className="radar-ring r2" /><span className="radar-ring r3" /><span className="radar-sweep" /><span className="avatar avatar-you radar-avatar">{playerInitial(name)}</span></div>
-      <p className="eyebrow"><i className="status-dot" /> {hasError ? 'CONNECTION NEEDED' : opponentOnline ? 'OPPONENT ONLINE' : connecting ? 'CONNECTING LIVE' : 'YOU’RE IN THE QUEUE'}</p>
-      <h1 aria-live="polite">{hasError ? 'Multiplayer is offline' : opponentOnline ? 'Opponent found!' : connecting ? 'Joining the lobby...' : 'Waiting for a rival...'}</h1>
-      <p>{hasError ? error || 'The realtime service is unavailable on this deployment.' : opponentOnline ? 'Both players are connected. Your match is starting.' : 'You’ll be matched as soon as another real player comes online'}</p>
-      <div className="search-progress" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} aria-label={opponentOnline ? 'Opponent found — match ready' : 'Searching for opponent'}><i style={{ width: `${progress}%` }} /></div>
-      <div className="match-stats">
-        <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? 'Rival connected' : 'Waiting for another player'}</span>
-        <span><Clock3 /> Waiting {secondsWaiting}s</span>
-      </div>
+      <p className="eyebrow"><i className="status-dot" /> {dailyLimitReached ? 'DAILY RANKED LIMIT' : hasError ? 'CONNECTION NEEDED' : opponentOnline ? 'OPPONENT ONLINE' : connecting ? 'CONNECTING LIVE' : 'YOU’RE IN THE QUEUE'}</p>
+      <h1 aria-live="polite">{dailyLimitReached ? 'Daily ranked limit reached' : hasError ? 'Multiplayer is offline' : opponentOnline ? 'Opponent found!' : connecting ? 'Joining the lobby...' : 'Waiting for a rival...'}</h1>
+      <p>{dailyLimitReached ? error : hasError ? error || 'The realtime service is unavailable on this deployment.' : opponentOnline ? 'Both players are connected. Your match is starting.' : 'You’ll be matched as soon as another real player comes online'}</p>
+      <div className="search-progress" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} aria-label={dailyLimitReached ? 'Daily ranked match limit reached' : opponentOnline ? 'Opponent found — match ready' : 'Searching for opponent'}><i style={{ width: `${progress}%` }} /></div>
+      {dailyLimitReached ? (
+        <div className="match-stats">
+          <span className="opponent-count"><Gauge /> Ranked queue paused</span>
+          <span><Clock3 /> Daily reset pending</span>
+        </div>
+      ) : (
+        <div className="match-stats">
+          <span className={opponentOnline ? 'opponent-count online' : 'opponent-count'}><Globe2 /> {opponentOnline ? 'Rival connected' : 'Waiting for another player'}</span>
+          <span><Gauge /> {ratingGames < 10 ? 'Provisional ' : ''}{Math.round(rating)} rating · ±{ratingWindow}</span>
+          <span><Clock3 /> Waiting {secondsWaiting}s</span>
+        </div>
+      )}
       {offerBot && (
         <div className="bot-offer">
-          <p>{hasError ? "Multiplayer is offline right now." : "We couldn't find an available player."} Play against a bot?</p>
+          <p>{dailyLimitReached ? 'Ranked play is done for today.' : hasError ? 'Multiplayer is offline right now.' : "We couldn't find an available player."} Play against a bot?</p>
           <button className="button" onClick={onPlayBot}><BrainCircuit size={17} /> Play against bot</button>
           <small>Practice match — counts toward matches played, but not ranked score.</small>
         </div>
       )}
-      {!opponentOnline && !hasError && <p className="queue-note">Keep this tab open, or jump into a bot match anytime.</p>}
+      {!opponentOnline && !hasError && !dailyLimitReached && <p className="queue-note">Keep this tab open, or jump into a bot match anytime.</p>}
       <button className="text-button" onClick={() => onCancel({ secondsWaiting, status })}>Cancel search</button>
     </main>
   );
@@ -995,7 +1199,7 @@ function usePartyConnection({ code, name, playerIdRef, createdPartyCodeRef, onGa
     const channel = channelRef.current;
     if (!channel) return;
     const msg = { id: createPlayerId(), playerId: playerIdRef.current, name: nameRef.current, text, at: Date.now() };
-    setChat((current) => appendChatMessage(current, msg));
+    setChat((current) => appendChatMessage(current, { ...msg, pending: true }));
     channel.send({ type: 'broadcast', event: 'party-chat', payload: msg });
   }, [playerIdRef]);
 
@@ -1611,7 +1815,7 @@ function TournamentPartyGame({ player, game, onFinish, onExit }) {
   );
 }
 
-function Game({ player, match, onFinish, onExit }) {
+function Game({ player, match, onFinish, onExit, onReport }) {
   const questions = useRef(match.questions ?? getQuestionsForMatch(match.id)).current;
   const [questionIndex, setQuestionIndex] = useState(0);
   const [time, setTime] = useState(15);
@@ -1669,7 +1873,7 @@ function Game({ player, match, onFinish, onExit }) {
       total_rounds: questions.length,
       score: localScore,
       opponent_score: remoteScore,
-      outcome: localScore >= remoteScore ? 'win' : 'loss',
+      outcome: localScore === remoteScore ? 'tie' : localScore > remoteScore ? 'win' : 'loss',
     });
     onFinish({ score: localScore, opponentScore: remoteScore });
   }, [attemptId, gameMode, match.id, onFinish, questions.length]);
@@ -1854,7 +2058,7 @@ function Game({ player, match, onFinish, onExit }) {
 
   function sendChat(text) {
     const msg = { id: createPlayerId(), playerId: match.playerId, name: player, text, at: Date.now() };
-    setChatMessages((current) => appendChatMessage(current, msg));
+    setChatMessages((current) => appendChatMessage(current, { ...msg, pending: true }));
     match.channel.send({ type: 'broadcast', event: 'chat', payload: msg });
   }
 
@@ -1881,7 +2085,7 @@ function Game({ player, match, onFinish, onExit }) {
         <div className={feedback ? 'feedback show' : 'feedback'} role="status">{feedback}</div>
         {!started && <div className="match-countdown"><span>RIVAL CONNECTED</span><strong>Get ready…</strong></div>}
       </section>
-      {!match.isBot && <ChatDock title="Match chat" scopeLabel="you and your rival" messages={chatMessages} onSend={sendChat} selfId={match.playerId} />}
+      {!match.isBot && <ChatDock title="Match chat" scopeLabel="you and your rival" channelId={`match:${match.id}`} messages={chatMessages} onSend={sendChat} onReport={onReport} selfId={match.playerId} />}
     </main>
   );
 }
@@ -1919,31 +2123,39 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty })
       </main>
     );
   }
-  const won = result.score >= result.opponentScore;
-  const { xpGained = 0, streak = 0, totalXp = 0 } = result.matchStats || {};
+  const won = result.score > result.opponentScore;
+  const drawn = result.score === result.opponentScore;
+  const {
+    xpGained = 0,
+    streak = 0,
+    totalXp = 0,
+    competitiveRating = 1200,
+    ratingChange = null,
+    ratingPending = false,
+  } = result.matchStats || {};
   return (
     <main className="game-shell results-screen">
       <Logo />
-      <div className={won ? 'result-emblem win' : 'result-emblem'} role="img" aria-label={won ? 'You won this match' : 'Match complete'}>{won ? <Trophy aria-hidden="true" /> : <BrainCircuit aria-hidden="true" />}</div>
+      <div className={won ? 'result-emblem win' : 'result-emblem'} role="img" aria-label={won ? 'You won this match' : drawn ? 'This match was a draw' : 'Match complete'}>{won ? <Trophy aria-hidden="true" /> : <BrainCircuit aria-hidden="true" />}</div>
       <p className="eyebrow">{result.vsBot ? 'PRACTICE MATCH COMPLETE' : 'MATCH COMPLETE'}</p>
-      <h1>{won ? 'Brilliant win!' : 'So close. Run it back?'}</h1>
-      <p>{result.vsBot ? 'Practice match against a bot — it counts toward matches played, but not your ranked score.' : won ? 'Fast thinking pays off. Your rank is moving up.' : 'Every match sharpens the mind. Your next rival is waiting.'}</p>
+      <h1>{won ? 'Brilliant win!' : drawn ? 'Dead even. Settle it?' : 'So close. Run it back?'}</h1>
+      <p>{result.vsBot ? 'Practice match against a bot — it counts toward matches played, but not your competitive rating.' : won ? 'Fast thinking pays off. Your rating is moving up.' : drawn ? 'A draw counts as an even result in your competitive rating.' : 'Every match sharpens the mind. Your next rival is waiting.'}</p>
       <div className="result-card">
         <div><span className="avatar avatar-you">{playerInitial(player)}</span><strong>{player}</strong><b>{result.score.toLocaleString()}</b></div>
-        <span className="result-vs">{won ? 'WIN' : 'GG'}</span>
+        <span className="result-vs">{won ? 'WIN' : drawn ? 'DRAW' : 'GG'}</span>
         <div><span className="avatar avatar-nova">{opponent[0]}</span><strong>{opponent}</strong><b>{result.opponentScore.toLocaleString()}</b></div>
       </div>
-      {result.matchStats && <div className="reward-row"><span><Zap /> +{xpGained} score</span><span><BarChart3 /> {totalXp.toLocaleString()} total score</span><span><Bolt /> {streak} streak</span></div>}
+      {result.matchStats && <div className="reward-row"><span><Zap /> +{xpGained} score</span><span><BarChart3 /> {totalXp.toLocaleString()} total score</span><span><Bolt /> {streak} streak</span>{ratingPending ? <span><Gauge /> Rating settles when both results arrive</span> : ratingChange !== null && <span><Gauge /> {ratingChange > 0 ? '+' : ''}{ratingChange} rating · {competitiveRating}</span>}</div>}
       <div className="result-actions"><button className="button" onClick={onRematch}><Play size={17} /> Play again</button><button className="button button-secondary" onClick={onHome}>Back home</button></div>
     </main>
   );
 }
 
-function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay }) {
+function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onHub, onLearn, onLogin, onLogout, onAccountPlay }) {
   return (
     <div id="top">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
+      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onHub={onHub} onLearn={onLearn} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} />
       <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
         <span className="leaderboard-fab-icon"><Trophy aria-hidden="true" /></span>
         <span><small>{accountRank ? `YOUR RANK · #${accountRank.rank_position}` : 'LIVE GLOBAL RANKS'}</small><strong>{accountRank ? 'Climb even higher' : 'Can you take the top spot?'}</strong></span>
@@ -1965,12 +2177,14 @@ function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPla
               {accountName ? (
                 <>
                   <button className="button button-large" onClick={onAccountPlay}><Play fill="currentColor" size={18} aria-hidden="true" /> Play with my account</button>
+                  <button className="button button-secondary button-large" onClick={onLearn}><BookOpen size={18} aria-hidden="true" /> Learning mode</button>
                   <button className="button button-secondary button-large" onClick={onParty}><Users size={18} aria-hidden="true" /> Play with friends</button>
                   <span className="signed-in-copy"><Check aria-hidden="true" /> Signed in as <b>{accountName}</b></span>
                 </>
               ) : (
                 <>
                   <button className="button button-large" onClick={onCreate}>Create account <ArrowRight size={18} aria-hidden="true" /></button>
+                  <button className="button button-secondary button-large" onClick={onLearn}><BookOpen size={18} aria-hidden="true" /> Try learning mode</button>
                   <button className="button button-secondary button-large" onClick={onParty}><Users size={18} aria-hidden="true" /> Play with friends</button>
                   <button className="button button-secondary button-large" onClick={onGuest}><Play size={18} aria-hidden="true" /> Play as guest</button>
                 </>
@@ -2034,13 +2248,22 @@ function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPla
 
 export default function App() {
   const { data: session, isPending: authPending } = authClient.useSession();
-  const [screen, setScreen] = useState(() => window.location.pathname.startsWith('/admin') ? 'admin' : 'landing');
+  const [screen, setScreen] = useState(() => {
+    if (window.location.pathname.startsWith('/admin')) return 'admin';
+    if (window.location.pathname.startsWith('/hub')) return 'hub';
+    if (window.location.pathname.startsWith('/learn')) return 'learning';
+    return 'landing';
+  });
   const [modal, setModal] = useState(null);
   const [player, setPlayer] = useState('');
   const [opponent, setOpponent] = useState('');
   const [match, setMatch] = useState(null);
   const [result, setResult] = useState(null);
   const [adminAccess, setAdminAccess] = useState(false);
+  const [hubData, setHubData] = useState(null);
+  const [hubLoading, setHubLoading] = useState(false);
+  const [hubError, setHubError] = useState('');
+  const [learningPreset, setLearningPreset] = useState(null);
   const [guestDestination, setGuestDestination] = useState('matchmaking');
   const [confirmLeave, setConfirmLeave] = useState(false);
   // `partyCode` is the party you have actually joined/created. A code sitting
@@ -2054,6 +2277,7 @@ export default function App() {
   const partyPlayerId = useRef(createPlayerId());
   const createdPartyCodeRef = useRef('');
   const screenRef = useRef(screen);
+  const hubRequestId = useRef(0);
 
   useEffect(() => {
     return initializeAnalytics('/');
@@ -2068,6 +2292,8 @@ export default function App() {
       'party-game': '/party/game',
       game: '/game',
       results: '/results',
+      hub: '/hub',
+      learning: '/learn',
     };
     if (paths[screen]) trackPageView(paths[screen]);
   }, [screen]);
@@ -2081,11 +2307,55 @@ export default function App() {
         }
         setScreen('admin');
       }
-      else if (screenRef.current === 'admin') setScreen('landing');
+      else if (window.location.pathname.startsWith('/hub')) setScreen('hub');
+      else if (window.location.pathname.startsWith('/learn')) setScreen('learning');
+      else if (['admin', 'hub', 'learning'].includes(screenRef.current)) setScreen('landing');
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  const loadPlayerHub = useCallback(async () => {
+    const requestId = ++hubRequestId.current;
+    if (!session?.user) {
+      if (requestId === hubRequestId.current) setHubData(null);
+      return;
+    }
+    setHubLoading(true);
+    setHubError('');
+    try {
+      const nextHub = await fetchPlayerHub();
+      if (requestId === hubRequestId.current) setHubData(nextHub);
+    } catch (error) {
+      if (requestId === hubRequestId.current) {
+        setHubError(error?.message || 'Your progression could not be loaded.');
+      }
+    } finally {
+      if (requestId === hubRequestId.current) setHubLoading(false);
+    }
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    hubRequestId.current += 1;
+    setHubData(null);
+    setHubError('');
+    setHubLoading(false);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (screen === 'hub' && session?.user) loadPlayerHub();
+  }, [loadPlayerHub, screen, session?.user?.id]);
+
+  useEffect(() => {
+    if (screen === 'learning' && !hubData && session?.user) loadPlayerHub();
+  }, [hubData, loadPlayerHub, screen, session?.user?.id]);
+
+  useEffect(() => {
+    if (!authReady || screen !== 'hub' || session?.user) return;
+    window.history.replaceState(null, '', '/');
+    setScreen('landing');
+    setModal('login');
+  }, [authReady, screen, session?.user]);
 
   // The party connection lives here, not in the party screen, so finishing a
   // game or browsing other screens never disconnects anyone from the party.
@@ -2115,7 +2385,7 @@ export default function App() {
     try {
       if (match?.isBot) {
         // Counts toward the global matches total, but not ranked score.
-        await recordBotMatch(match.id);
+        await recordBotMatch(match.id, data.score, data.opponentScore);
       } else {
         const authorization = match?.getAuthorization?.();
         matchStats = await recordMatchResult(
@@ -2149,7 +2419,9 @@ export default function App() {
       mode,
       score: data.score,
       opponent_score: data.opponentScore,
-      outcome: data.outcome || (data.score >= data.opponentScore ? 'win' : 'loss'),
+      outcome: data.score === data.opponentScore
+        ? 'tie'
+        : data.outcome || (data.score > data.opponentScore ? 'win' : 'loss'),
     });
     trackAnalyticsEvent('result_viewed', { game_id: analyticsGameId, mode, score: data.score, opponent_score: data.opponentScore });
     setResult(data);
@@ -2226,7 +2498,42 @@ export default function App() {
     setConfirmLeave(false);
     window.history.replaceState(null, '', window.location.pathname);
   }
-  function playAccount() { if (accountName) start(accountName); else setModal('login'); }
+  function playAccount() {
+    if (!accountName) {
+      setModal('login');
+      return;
+    }
+    if (window.location.pathname.startsWith('/hub')) {
+      window.history.replaceState(null, '', '/');
+    }
+    start(accountName);
+  }
+  function openHub() {
+    if (!accountName) {
+      setModal('login');
+      return;
+    }
+    window.history.pushState(null, '', '/hub');
+    setModal(null);
+    setScreen('hub');
+  }
+  function openLearning(preset = null) {
+    setLearningPreset(preset && typeof preset === 'object' ? preset : null);
+    window.history.pushState(null, '', '/learn');
+    setModal(null);
+    setScreen('learning');
+  }
+  async function saveLearningAttempt(attempt) {
+    if (!session?.user) return null;
+    return recordLearningAttempt(attempt);
+  }
+  const submitChatReport = session?.user
+    ? async (report) => {
+        const result = await recordChatReport(report);
+        trackAnalyticsEvent('chat_reported', { reason: report.reason, channel_type: report.channel?.split(':')[0] || 'unknown' });
+        return result;
+      }
+    : undefined;
   function playParty() {
     if (accountName) {
       start(accountName, 'party');
@@ -2259,25 +2566,29 @@ export default function App() {
   }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
   function home() {
-    if (window.location.pathname.startsWith('/admin')) window.history.replaceState(null, '', '/');
+    if (['/admin', '/hub', '/learn'].some((path) => window.location.pathname.startsWith(path))) {
+      window.history.replaceState(null, '', '/');
+    }
     setScreen('landing');
     setResult(null);
     setMatch(null);
     setOpponent('');
   }
-  async function logout() { await authClient.signOut(); home(); }
+  async function logout() { await authClient.signOut(); setHubData(null); home(); }
 
   const inParty = Boolean(partyCode && player);
-  const showPartyPill = inParty && screen !== 'party' && screen !== 'party-game' && screen !== 'game' && screen !== 'admin';
+  const showPartyPill = inParty && !['party', 'party-game', 'game', 'admin', 'hub', 'learning'].includes(screen);
 
   let content;
-  if (screen === 'admin') content = <AdminDashboard brand={<Logo />} session={session} authPending={authPending} onBack={closeAdmin} onLogin={() => setModal('login')} onLogout={logout} />;
-  else if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={cancelMatchmaking} />;
+  if (screen === 'admin') content = <AdminDashboard brand={<Logo onHome={closeAdmin} />} session={session} authPending={authPending} onBack={closeAdmin} onLogin={() => setModal('login')} onLogout={logout} />;
+  else if (screen === 'hub') content = <PlayerHub brand={<Logo onHome={home} />} session={session} data={hubData} loading={authPending || hubLoading || (Boolean(session?.user) && !hubData && !hubError)} error={hubError} onBack={home} onPlay={playAccount} onLearn={openLearning} onRetry={loadPlayerHub} />;
+  else if (screen === 'learning') content = <LearningMode hubData={hubData} initialFocus={learningPreset} isSignedIn={Boolean(session?.user)} onAnalyticsEvent={trackAnalyticsEvent} onAttempt={saveLearningAttempt} onExit={home} sessionSeed={session?.user?.id || VISITOR_ID} />;
+  else if (screen === 'matchmaking') content = <Matchmaking name={player} rating={accountRank?.competitive_rating || 1200} ratingGames={accountRank?.rating_games || 0} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={cancelMatchmaking} />;
   else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;
   else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={handlePartyFinish} onExit={() => setScreen(inParty ? 'party' : 'landing')} />;
-  else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
+  else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} onReport={submitChatReport} />;
   else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen('party') : undefined} />;
-  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />;
+  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onHub={openHub} onLearn={openLearning} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} />;
 
   const modalContent = modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
       const invite = guestDestination === 'party' ? pendingInvite.current : '';
@@ -2289,7 +2600,7 @@ export default function App() {
   return <>
     {content}
     {modalContent}
-    {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} />}
+    {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" channelId={`party:${partyCode}`} messages={party.chat} onSend={party.sendChat} onReport={submitChatReport} selfId={partyPlayerId.current} />}
     {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={() => setConfirmLeave(true)} />}
     {confirmLeave && <ConfirmDialog title="Leave the party?" message="Are you sure you want to leave the party? You'll need the invite link or code to rejoin." confirmLabel="Leave party" onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}
   </>;

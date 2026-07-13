@@ -37,6 +37,11 @@ const ALLOWED_EVENTS = new Set([
   'party_left',
   'party_game_started',
   'result_viewed',
+  'lesson_started',
+  'lesson_completed',
+  'lesson_abandoned',
+  'learning_question_answered',
+  'chat_reported',
 ]);
 
 const PROPERTY_KEYS = new Set([
@@ -60,6 +65,11 @@ const PROPERTY_KEYS = new Set([
   'game_type',
   'persisted',
   'recovered',
+  'difficulty',
+  'channel_type',
+  'questions_answered',
+  'correct_answers',
+  'accuracy',
 ]);
 
 function safeText(value, maxLength = 240) {

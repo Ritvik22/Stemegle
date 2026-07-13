@@ -86,6 +86,48 @@ test('analytics payloads accept allowlisted context and properties only', () => 
   assert.equal(payload.referrer.includes('token='), false);
 });
 
+test('learning lifecycle events retain only useful aggregate lesson properties', () => {
+  const payload = buildAnalyticsPayload(request(), {
+    event_id: EVENT_ID,
+    event_name: 'lesson_completed',
+    path: '/learn',
+    properties: {
+      mode: 'learning',
+      attempt_id: '55555555-5555-4555-8555-555555555555',
+      category: 'Physics',
+      difficulty: 'Hard',
+      total_rounds: 10,
+      questions_answered: 10,
+      correct_answers: 8,
+      accuracy: 80,
+      status: 'guest',
+      prompt: 'Never retain question text here',
+    },
+  }, { visitorId: VISITOR_ID, sessionId: SESSION_ID });
+
+  assert.equal(payload.eventName, 'lesson_completed');
+  assert.deepEqual(payload.properties, {
+    mode: 'learning',
+    attempt_id: '55555555-5555-4555-8555-555555555555',
+    category: 'Physics',
+    difficulty: 'Hard',
+    total_rounds: 10,
+    questions_answered: 10,
+    correct_answers: 8,
+    accuracy: 80,
+    status: 'guest',
+  });
+  for (const eventName of ['lesson_started', 'lesson_abandoned']) {
+    const lifecyclePayload = buildAnalyticsPayload(request(), {
+      event_id: EVENT_ID,
+      event_name: eventName,
+      path: '/learn',
+      properties: { mode: 'learning', questions_answered: 3 },
+    }, { visitorId: VISITOR_ID, sessionId: SESSION_ID });
+    assert.equal(lifecyclePayload.eventName, eventName);
+  }
+});
+
 test('signed cookies keep first-auth journeys together and isolate later actor changes', () => {
   const anonymous = requestIdentity(request(), null);
   const cookie = anonymous.cookies.map((header) => header.split(';')[0]).join('; ');

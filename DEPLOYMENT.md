@@ -191,6 +191,19 @@ The distinct image prefix is also required: without it, a staging build can
 retag production's rollback images even when the containers and volumes are
 otherwise isolated.
 
+For the branch demo, use `compose.demo.yaml` in every Compose command and keep
+its checkout, environment, tunnel credential, image prefix, ports, and volumes
+separate from production:
+
+```bash
+docker compose -p stemegle-demo --env-file .env \
+  -f compose.yaml -f compose.demo.yaml up -d --build --wait backend backup app
+```
+
+The demo tunnel must be a separate named Cloudflare tunnel whose only hostname
+is `demo.stemegle.com`. Do not add the demo hostname to, or restart, the
+production tunnel.
+
 ## Cloudflare Analytics Headers
 
 Enable Cloudflare's **Add visitor location headers** managed transform. The API

@@ -41,11 +41,15 @@ export function fetchStats() {
   return request('/api/stats');
 }
 
-export async function recordBotMatch(matchId) {
+export function fetchPlayerHub() {
+  return request('/api/player/hub');
+}
+
+export async function recordBotMatch(matchId, score, opponentScore) {
   if (!matchId) return null;
   return request('/api/matches/bot', {
     method: 'POST',
-    body: JSON.stringify({ matchId }),
+    body: JSON.stringify({ matchId, score, opponentScore }),
   });
 }
 
@@ -58,6 +62,20 @@ export async function recordMatchResult(matchId, playerId, ticket, score, oppone
   return result?.stats || null;
 }
 
+export function recordLearningAttempt(attempt) {
+  return request('/api/learning/attempts', {
+    method: 'POST',
+    body: JSON.stringify(attempt),
+  });
+}
+
+export function recordChatReport({ reportToken, reason } = {}) {
+  return request('/api/chat/reports', {
+    method: 'POST',
+    body: JSON.stringify({ reportToken, reason }),
+  });
+}
+
 export async function fetchAdminAccess() {
   const result = await request('/api/admin/access');
   return Boolean(result?.allowed);
@@ -66,4 +84,20 @@ export async function fetchAdminAccess() {
 export function fetchAdminDashboard(days) {
   const range = Math.max(1, Math.min(Number(days) || 30, 3650));
   return request(`/api/admin/analytics?days=${range}`);
+}
+
+export function fetchAdminChatReports({ status = 'pending', limit = 100, offset = 0 } = {}) {
+  const params = new URLSearchParams({
+    status,
+    limit: String(Math.max(1, Math.min(Number(limit) || 100, 200))),
+    offset: String(Math.max(0, Math.trunc(Number(offset) || 0))),
+  });
+  return request(`/api/admin/chat-reports?${params}`);
+}
+
+export function updateAdminChatReport(id, status) {
+  return request(`/api/admin/chat-reports/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  });
 }

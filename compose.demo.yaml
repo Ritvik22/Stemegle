@@ -1,0 +1,11 @@
+name: stemegle-demo
+
+services:
+  tunnel:
+    # The demo credential is owned by the unprivileged server account and can
+    # remain mode 600 when cloudflared runs with the same uid/gid.
+    user: "1000:1000"
+
+  autodeploy:
+    environment:
+      COMPOSE_PROJECT_NAME: stemegle-demo
