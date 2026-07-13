@@ -552,7 +552,10 @@ async function main() {
   });
   expect(learning?.recorded === true, 'Trusted learning attempt was not recorded');
   expect(learning.summary?.category === learningQuestion.category, 'Learning category was not server-derived');
-  expect(learning.summary?.difficulty === learningQuestion.difficulty, 'Learning difficulty was not server-derived');
+  expect(
+    learning.summary?.difficulty === learningQuestion.difficulty.toLowerCase(),
+    'Learning difficulty was not server-derived',
+  );
   expect(learning.summary?.correct === 1, 'Trusted correct answer did not update mastery');
   console.log(`PROGRESSION_LEARNING_OK: ${learningQuestion.category} / ${learningQuestion.difficulty}`);
 
