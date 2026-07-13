@@ -78,10 +78,11 @@ async function trackPeer(peer, channelId, state) {
   await peer.next((message) => message.type === 'ack' && message.ref === ref);
 }
 
-async function answerMatch(peer, channelId, playerId, matchId, correct) {
+async function answerMatch(peer, channelId, playerId, matchId, correct, options = {}) {
   const questions = getQuestionsForMatch(matchId);
-  let score = 0;
-  for (let questionIndex = 0; questionIndex < questions.length; questionIndex += 1) {
+  let score = Number(options.initialScore) || 0;
+  const startIndex = Number(options.startIndex) || 0;
+  for (let questionIndex = startIndex; questionIndex < questions.length; questionIndex += 1) {
     const ref = `answer-${channelId}-${questionIndex}`;
     const selected = correct ? questions[questionIndex].answer : -1;
     const responseMs = 15_000;
@@ -212,6 +213,196 @@ test('presence heartbeats replace their meta and disconnects clean the roster', 
   assert.equal(fixture.counts.at(-1), 0);
 });
 
+test('signed matchmaking presence uses server-owned name and rating', async () => {
+  const connectedAfter = Date.now();
+  const fixture = await createFixture({
+    getSessionUserId(request) {
+      if (request.headers['x-test-user'] !== 'signed-user') return null;
+      return {
+        userId: 'signed-user',
+        battleName: 'Verified Player',
+        competitiveRating: 1475,
+        ratingGames: 18,
+        rankedEligible: true,
+        rankedMatchesToday: 42,
+        rankedMatchLimit: 100,
+      };
+    },
+  });
+  const signed = await openPeer(fixture.url, { headers: { 'x-test-user': 'signed-user' } });
+  const observer = await openPeer(fixture.url);
+  try {
+    signed.send(subscription('signed-lobby', 'stemegle:lobby:v1', 'signed-player'));
+    observer.send(subscription('observer-lobby', 'stemegle:lobby:v1', 'observer-player'));
+    await signed.next((message) => message.type === 'subscribed');
+    await observer.next((message) => message.type === 'subscribed');
+
+    signed.send({
+      type: 'presence.track',
+      ref: 'signed-track',
+      channelId: 'signed-lobby',
+      state: {
+        playerId: 'signed-player',
+        name: 'Forged Name',
+        rating: 100,
+        ratingGames: 0,
+        joinedAt: 10,
+      },
+    });
+    await signed.next((message) => message.type === 'ack' && message.ref === 'signed-track');
+    const roster = await observer.next(
+      (message) => message.type === 'presence.sync' && message.state['signed-player'],
+    );
+    assert.deepEqual(
+      {
+        name: roster.state['signed-player'][0].name,
+        rating: roster.state['signed-player'][0].rating,
+        ratingGames: roster.state['signed-player'][0].ratingGames,
+        rankedEligible: roster.state['signed-player'][0].rankedEligible,
+        rankedMatchesToday: roster.state['signed-player'][0].rankedMatchesToday,
+        rankedMatchLimit: roster.state['signed-player'][0].rankedMatchLimit,
+      },
+      {
+        name: 'Verified Player',
+        rating: 1475,
+        ratingGames: 18,
+        rankedEligible: true,
+        rankedMatchesToday: 42,
+        rankedMatchLimit: 100,
+      },
+    );
+    assert.ok(roster.state['signed-player'][0].joinedAt >= connectedAfter);
+    assert.notEqual(roster.state['signed-player'][0].joinedAt, 10);
+  } finally {
+    await signed.close();
+    await observer.close();
+    await fixture.close();
+  }
+});
+
+test('daily-limit accounts are visible as ineligible and cannot receive ranked tickets', async () => {
+  const fixture = await createFixture({
+    getSessionUserId(request) {
+      const userId = request.headers['x-test-user'];
+      if (!userId) return null;
+      return {
+        userId,
+        battleName: userId,
+        competitiveRating: 1200,
+        ratingGames: 20,
+        rankedEligible: userId !== 'capped-user',
+        rankedMatchesToday: userId === 'capped-user' ? 100 : 3,
+        rankedMatchLimit: 100,
+      };
+    },
+  });
+  const capped = await openPeer(fixture.url, { headers: { 'x-test-user': 'capped-user' } });
+  const eligible = await openPeer(fixture.url, { headers: { 'x-test-user': 'eligible-user' } });
+  const topic = 'stemegle:match:capped-player--eligible-player';
+  try {
+    capped.send(subscription('capped-match', topic, 'capped-player'));
+    eligible.send(subscription('eligible-match', topic, 'eligible-player'));
+    await capped.next((message) => message.type === 'subscribed');
+    await eligible.next((message) => message.type === 'subscribed');
+    await trackPeer(capped, 'capped-match', {
+      playerId: 'capped-player', name: 'Forged', joinedAt: 1,
+    });
+    await trackPeer(eligible, 'eligible-match', {
+      playerId: 'eligible-player', name: 'Forged', joinedAt: 2,
+    });
+    const cappedTicket = await capped.next((message) => message.type === 'match_ticket');
+    const eligibleTicket = await eligible.next((message) => message.type === 'match_ticket');
+    assert.equal(cappedTicket.ranked, false);
+    assert.equal(eligibleTicket.ranked, false);
+    const cappedPresence = await eligible.next(
+      (message) => message.type === 'presence.sync'
+        && message.state['capped-player']?.[0]?.rankedEligible === false,
+    );
+    assert.equal(cappedPresence.state['capped-player'][0].rankedMatchesToday, 100);
+    assert.equal(cappedPresence.state['capped-player'][0].rankedMatchLimit, 100);
+  } finally {
+    await capped.close();
+    await eligible.close();
+    await fixture.close();
+  }
+});
+
+test('ranked reservations block concurrent tickets and advance every open quota view', async () => {
+  const fixture = await createFixture({
+    getSessionUserId(request) {
+      const userId = request.headers['x-test-user'];
+      if (!userId) return null;
+      return {
+        userId,
+        battleName: userId,
+        competitiveRating: 1200,
+        ratingGames: 0,
+        rankedEligible: true,
+        rankedMatchesToday: userId === 'quota-user-a' ? 99 : 0,
+        rankedMatchLimit: 100,
+      };
+    },
+  });
+  const peers = await Promise.all([
+    openPeer(fixture.url, { headers: { 'x-test-user': 'quota-user-a' } }),
+    openPeer(fixture.url, { headers: { 'x-test-user': 'quota-user-b' } }),
+    openPeer(fixture.url, { headers: { 'x-test-user': 'quota-user-a' } }),
+    openPeer(fixture.url, { headers: { 'x-test-user': 'quota-user-c' } }),
+    openPeer(fixture.url, { headers: { 'x-test-user': 'quota-user-a' } }),
+    openPeer(fixture.url, { headers: { 'x-test-user': 'quota-user-d' } }),
+  ]);
+
+  async function issuePair(left, right, leftId, rightId, suffix) {
+    const matchId = `${leftId}--${rightId}`;
+    const topic = `stemegle:match:${matchId}`;
+    const leftChannel = `quota-left-${suffix}`;
+    const rightChannel = `quota-right-${suffix}`;
+    left.send(subscription(leftChannel, topic, leftId));
+    right.send(subscription(rightChannel, topic, rightId));
+    await left.next((message) => message.type === 'subscribed');
+    await right.next((message) => message.type === 'subscribed');
+    await trackPeer(left, leftChannel, { playerId: leftId, name: 'Left', joinedAt: 1 });
+    await trackPeer(right, rightChannel, { playerId: rightId, name: 'Right', joinedAt: 2 });
+    const [leftTicket, rightTicket] = await Promise.all([
+      left.next((message) => message.type === 'match_ticket'),
+      right.next((message) => message.type === 'match_ticket'),
+    ]);
+    return { matchId, leftTicket, rightTicket };
+  }
+
+  try {
+    const first = await issuePair(
+      peers[0], peers[1], 'quota-a-one', 'quota-b-one', 'one',
+    );
+    assert.equal(first.leftTicket.ranked, true);
+    assert.equal(first.rightTicket.ranked, true);
+
+    const concurrent = await issuePair(
+      peers[2], peers[3], 'quota-a-two', 'quota-c-two', 'two',
+    );
+    assert.equal(concurrent.leftTicket.ranked, false);
+    assert.equal(concurrent.rightTicket.ranked, false);
+
+    assert.equal(fixture.realtime.completeMatchTicket({
+      ticket: first.leftTicket.ticket,
+      matchId: first.matchId,
+    }), true);
+
+    const afterCompletion = await issuePair(
+      peers[4], peers[5], 'quota-a-three', 'quota-d-three', 'three',
+    );
+    assert.equal(afterCompletion.leftTicket.ranked, false);
+    assert.equal(afterCompletion.rightTicket.ranked, false);
+    assert.equal(fixture.realtime.completeMatchTicket({
+      ticket: first.leftTicket.ticket,
+      matchId: first.matchId,
+    }), false);
+  } finally {
+    await Promise.allSettled(peers.map((peer) => peer.close()));
+    await fixture.close();
+  }
+});
+
 test('broadcasts echo to self, reach peers, dedupe event ids, and reject invalid payloads', async () => {
   const fixture = await createFixture();
   const first = await openPeer(fixture.url);
@@ -222,8 +413,31 @@ test('broadcasts echo to self, reach peers, dedupe event ids, and reject invalid
     second.send(subscription('match-b', topic, 'player-b', true));
     await first.next((message) => message.type === 'subscribed');
     await second.next((message) => message.type === 'subscribed');
+    first.send({
+      type: 'presence.track',
+      ref: 'control-name',
+      channelId: 'match-a',
+      state: { playerId: 'player-a', name: 'Alpha\nAdmin', joinedAt: 10 },
+    });
+    const controlNameError = await first.next((message) => message.ref === 'control-name');
+    assert.equal(controlNameError.code, 'invalid_presence');
     await trackPeer(first, 'match-a', { playerId: 'player-a', name: 'Alpha', joinedAt: 10 });
     await trackPeer(second, 'match-b', { playerId: 'player-b', name: 'Beta', joinedAt: 20 });
+
+    first.send({
+      type: 'broadcast',
+      ref: 'control-chat',
+      channelId: 'match-a',
+      event: 'chat',
+      payload: {
+        id: 'control-chat-message',
+        playerId: 'player-a',
+        name: 'Alpha',
+        text: 'hidden\tcontent',
+      },
+    });
+    const controlChatError = await first.next((message) => message.ref === 'control-chat');
+    assert.equal(controlChatError.code, 'forbidden_sender');
 
     first.send({
       type: 'broadcast',
@@ -396,12 +610,32 @@ test('match topics bind participants, accounts, lifecycle, and host-only events'
     const prematureFinish = await guest.next((message) => message.ref === 'premature-finish');
     assert.equal(prematureFinish.code, 'forbidden_sender');
 
+    const [firstQuestion] = getQuestionsForMatch('player-a--player-b');
+    const firstAnswer = {
+      type: 'broadcast',
+      ref: 'host-answer-first',
+      channelId: 'match-host',
+      eventId: 'host-answer-idempotent',
+      event: 'answer',
+      payload: {
+        playerId: 'player-a',
+        questionIndex: 0,
+        selected: firstQuestion.answer,
+        responseMs: 0,
+      },
+    };
+    host.send(firstAnswer);
+    await host.next((message) => message.type === 'ack' && message.ref === 'host-answer-first');
+    host.send({ ...firstAnswer, ref: 'host-answer-duplicate' });
+    await host.next((message) => message.type === 'ack' && message.ref === 'host-answer-duplicate');
+
     const hostScore = await answerMatch(
       host,
       'match-host',
       'player-a',
       'player-a--player-b',
       true,
+      { startIndex: 1, initialScore: 500 },
     );
     const guestScore = await answerMatch(
       guest,
@@ -435,6 +669,20 @@ test('match topics bind participants, accounts, lifecycle, and host-only events'
     assert.equal(completedAuthorization.pending, false);
     assert.ok(completedAuthorization.score > 0 && completedAuthorization.score <= 5875);
     assert.equal(completedAuthorization.opponentScore, 0);
+    assert.deepEqual(completedAuthorization.participants, [
+      {
+        playerId: 'player-a',
+        userId: 'user-a',
+        score: completedAuthorization.score,
+        opponentScore: 0,
+      },
+      {
+        playerId: 'player-b',
+        userId: 'user-b',
+        score: 0,
+        opponentScore: completedAuthorization.score,
+      },
+    ]);
   } finally {
     await host.close();
     await guest.close();
@@ -681,6 +929,243 @@ test('party leader and sender-bound events cannot be impersonated', async () => 
   } finally {
     await leader.close();
     await member.close();
+    await fixture.close();
+  }
+});
+
+test('chat reports use server-owned message evidence and account identity', async () => {
+  const fixture = await createFixture({
+    getSessionUserId(request) {
+      const userId = request.headers['x-test-user'];
+      if (!userId) return null;
+      return {
+        userId,
+        battleName: userId === 'reporter-user' ? 'Trusted Reporter' : 'Trusted Sender',
+        competitiveRating: 1200,
+        ratingGames: 0,
+      };
+    },
+  });
+  const reporter = await openPeer(fixture.url, { headers: { 'x-test-user': 'reporter-user' } });
+  const sender = await openPeer(fixture.url, { headers: { 'x-test-user': 'sender-user' } });
+  const topic = 'stemegle:party:SAFET';
+  try {
+    reporter.send(subscription('reporter-party', topic, 'reporter-player'));
+    sender.send(subscription('sender-party', topic, 'sender-player'));
+    await reporter.next((message) => message.type === 'subscribed');
+    await sender.next((message) => message.type === 'subscribed');
+    await trackPeer(reporter, 'reporter-party', {
+      playerId: 'reporter-player',
+      name: 'Forged Reporter',
+      joinedAt: 1,
+      lastSeen: 1,
+      partyLeader: true,
+    });
+    await trackPeer(sender, 'sender-party', {
+      playerId: 'sender-player',
+      name: 'Forged Sender',
+      joinedAt: 2,
+      lastSeen: 2,
+      partyLeader: false,
+    });
+
+    sender.send({
+      type: 'broadcast',
+      ref: 'reported-chat',
+      channelId: 'sender-party',
+      event: 'party-chat',
+      payload: {
+        id: 'message-to-report',
+        playerId: 'sender-player',
+        name: 'Another Forged Name',
+        text: 'Server-verifiable evidence',
+      },
+    });
+    await sender.next((message) => message.type === 'ack' && message.ref === 'reported-chat');
+    const message = await reporter.next(
+      (candidate) => candidate.type === 'broadcast' && candidate.event === 'party-chat',
+    );
+    assert.equal(message.payload.name, 'Trusted Sender');
+    assert.match(message.payload.id, /^chat-[A-Za-z0-9_-]{22}$/);
+    assert.notEqual(message.payload.id, 'message-to-report');
+    assert.equal(message.payload.clientMessageId, 'message-to-report');
+    assert.match(message.payload.reportToken, /^[A-Za-z0-9_-]{43}$/);
+    const evidence = fixture.realtime.verifyChatReportToken({
+      token: message.payload.reportToken,
+      reporterUserId: 'reporter-user',
+    });
+    assert.deepEqual({
+      messageId: evidence.messageId,
+      targetPlayerId: evidence.targetPlayerId,
+      targetUserId: evidence.targetUserId,
+      targetName: evidence.targetName,
+      channel: evidence.channel,
+      excerpt: evidence.excerpt,
+    }, {
+      messageId: message.payload.id,
+      targetPlayerId: 'sender-player',
+      targetUserId: 'sender-user',
+      targetName: 'Trusted Sender',
+      channel: 'party:SAFET',
+      excerpt: 'Server-verifiable evidence',
+    });
+    assert.ok(evidence.expiresAt > Date.now());
+    assert.equal(fixture.realtime.verifyChatReportToken({
+      token: message.payload.reportToken,
+      reporterUserId: 'sender-user',
+    }), null);
+  } finally {
+    await reporter.close();
+    await sender.close();
+    await fixture.close();
+  }
+});
+
+test('chat dedupe precedes evidence allocation and evidence evicts oldest at its hard cap', async () => {
+  const fixture = await createFixture({
+    maxChatMessagesPerMinute: 10,
+    maxChatReportEvidence: 2,
+  });
+  const sender = await openPeer(fixture.url, { headers: { 'x-test-user': 'sender-user' } });
+  const observer = await openPeer(fixture.url, { headers: { 'x-test-user': 'observer-user' } });
+  const topic = 'stemegle:party:CAPEV';
+  try {
+    sender.send(subscription('cap-sender', topic, 'sender-player'));
+    observer.send(subscription('cap-observer', topic, 'observer-player'));
+    await sender.next((message) => message.type === 'subscribed');
+    await observer.next((message) => message.type === 'subscribed');
+    await trackPeer(sender, 'cap-sender', {
+      playerId: 'sender-player', name: 'Sender', joinedAt: 1, lastSeen: 1, partyLeader: true,
+    });
+    await trackPeer(observer, 'cap-observer', {
+      playerId: 'observer-player', name: 'Observer', joinedAt: 2, lastSeen: 2, partyLeader: false,
+    });
+
+    async function sendChat(ref, eventId, text) {
+      sender.send({
+        type: 'broadcast',
+        ref,
+        channelId: 'cap-sender',
+        eventId,
+        event: 'party-chat',
+        payload: {
+          id: 'reused-client-message-id',
+          playerId: 'sender-player',
+          name: 'Sender',
+          text,
+        },
+      });
+      await sender.next((message) => message.type === 'ack' && message.ref === ref);
+      return observer.next(
+        (message) => message.type === 'broadcast' && message.eventId === eventId,
+      );
+    }
+
+    const first = await sendChat('cap-first', 'cap-event-first', 'First evidence');
+    sender.send({
+      type: 'broadcast',
+      ref: 'cap-first-duplicate',
+      channelId: 'cap-sender',
+      eventId: 'cap-event-first',
+      event: 'party-chat',
+      payload: {
+        id: 'reused-client-message-id',
+        playerId: 'sender-player',
+        name: 'Sender',
+        text: 'First evidence',
+      },
+    });
+    await sender.next(
+      (message) => message.type === 'ack' && message.ref === 'cap-first-duplicate',
+    );
+    await assert.rejects(
+      observer.next(
+        (message) => message.type === 'broadcast' && message.eventId === 'cap-event-first',
+        100,
+      ),
+      /Timed out/,
+    );
+
+    const second = await sendChat('cap-second', 'cap-event-second', 'Second evidence');
+    assert.ok(fixture.realtime.verifyChatReportToken({
+      token: first.payload.reportToken,
+      reporterUserId: 'observer-user',
+    }));
+    assert.notEqual(first.payload.id, second.payload.id);
+
+    const third = await sendChat('cap-third', 'cap-event-third', 'Third evidence');
+    assert.equal(fixture.realtime.verifyChatReportToken({
+      token: first.payload.reportToken,
+      reporterUserId: 'observer-user',
+    }), null);
+    assert.ok(fixture.realtime.verifyChatReportToken({
+      token: second.payload.reportToken,
+      reporterUserId: 'observer-user',
+    }));
+    assert.ok(fixture.realtime.verifyChatReportToken({
+      token: third.payload.reportToken,
+      reporterUserId: 'observer-user',
+    }));
+  } finally {
+    await sender.close();
+    await observer.close();
+    await fixture.close();
+  }
+});
+
+test('chat has a dedicated nonfatal per-connection rate limit', async () => {
+  const fixture = await createFixture({ maxChatMessagesPerMinute: 2 });
+  const sender = await openPeer(fixture.url);
+  const observer = await openPeer(fixture.url);
+  const topic = 'stemegle:party:LIMIT';
+  try {
+    sender.send(subscription('chat-limit-sender', topic, 'sender-player'));
+    observer.send(subscription('chat-limit-observer', topic, 'observer-player'));
+    await sender.next((message) => message.type === 'subscribed');
+    await observer.next((message) => message.type === 'subscribed');
+    await trackPeer(sender, 'chat-limit-sender', {
+      playerId: 'sender-player', name: 'Sender', joinedAt: 1, lastSeen: 1, partyLeader: true,
+    });
+    await trackPeer(observer, 'chat-limit-observer', {
+      playerId: 'observer-player', name: 'Observer', joinedAt: 2, lastSeen: 2, partyLeader: false,
+    });
+
+    for (let index = 0; index < 2; index += 1) {
+      sender.send({
+        type: 'broadcast',
+        ref: `chat-allowed-${index}`,
+        channelId: 'chat-limit-sender',
+        event: 'party-chat',
+        payload: {
+          id: `chat-client-${index}`,
+          playerId: 'sender-player',
+          name: 'Sender',
+          text: `Allowed ${index}`,
+        },
+      });
+      await sender.next(
+        (message) => message.type === 'ack' && message.ref === `chat-allowed-${index}`,
+      );
+    }
+    sender.send({
+      type: 'broadcast',
+      ref: 'chat-blocked',
+      channelId: 'chat-limit-sender',
+      event: 'party-chat',
+      payload: {
+        id: 'chat-client-blocked',
+        playerId: 'sender-player',
+        name: 'Sender',
+        text: 'Blocked',
+      },
+    });
+    const limited = await sender.next((message) => message.ref === 'chat-blocked');
+    assert.equal(limited.code, 'chat_rate_limited');
+    assert.equal(limited.fatal, false);
+    assert.equal(sender.socket.readyState, WebSocket.OPEN);
+  } finally {
+    await sender.close();
+    await observer.close();
     await fixture.close();
   }
 });

@@ -55,6 +55,10 @@ export async function getAnalyticsDashboard(requestedDays = 30) {
         count(*) filter (where event.event_name = 'game_started') as game_starts,
         count(*) filter (where event.event_name = 'game_completed') as game_completions,
         count(*) filter (where event.event_name = 'game_abandoned') as game_abandonments,
+        count(*) filter (where event.event_name = 'lesson_started') as learning_starts,
+        count(*) filter (where event.event_name = 'lesson_completed') as learning_completions,
+        count(*) filter (where event.event_name = 'lesson_abandoned') as learning_abandonments,
+        count(*) filter (where event.event_name = 'learning_question_answered') as learning_questions_answered,
         count(*) filter (
           where event.event_name = 'game_completed' and event.properties ->> 'mode' = 'bot'
         ) as bot_completions,
@@ -149,6 +153,10 @@ export async function getAnalyticsDashboard(requestedDays = 30) {
         coalesce(event_user_stats.game_starts, 0) as game_starts,
         coalesce(event_user_stats.game_completions, 0) as game_completions,
         coalesce(event_user_stats.game_abandonments, 0) as game_abandonments,
+        coalesce(event_user_stats.learning_starts, 0) as learning_starts,
+        coalesce(event_user_stats.learning_completions, 0) as learning_completions,
+        coalesce(event_user_stats.learning_abandonments, 0) as learning_abandonments,
+        coalesce(event_user_stats.learning_questions_answered, 0) as learning_questions_answered,
         coalesce(event_user_stats.bot_completions, 0) as bot_completions,
         coalesce(event_user_stats.human_completions, 0) as human_completions,
         coalesce(event_user_stats.party_completions, 0) as party_completions,
@@ -205,6 +213,18 @@ export async function getAnalyticsDashboard(requestedDays = 30) {
         'game_abandonments', (
           select count(distinct coalesce(properties ->> 'game_id', event_id::text))
           from window_events where event_name = 'game_abandoned'
+        ),
+        'learning_starts', (
+          select count(distinct coalesce(properties ->> 'attempt_id', event_id::text))
+          from window_events where event_name = 'lesson_started'
+        ),
+        'learning_completions', (
+          select count(distinct coalesce(properties ->> 'attempt_id', event_id::text))
+          from window_events where event_name = 'lesson_completed'
+        ),
+        'learning_abandonments', (
+          select count(distinct coalesce(properties ->> 'attempt_id', event_id::text))
+          from window_events where event_name = 'lesson_abandoned'
         )
       ),
       'funnel', jsonb_build_object(

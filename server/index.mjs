@@ -7,6 +7,7 @@ import { auth } from './auth.mjs';
 import { createApiRouter } from './api.mjs';
 import { purgeExpiredAnalytics } from './analytics.mjs';
 import { pool } from './db.mjs';
+import { MAX_RANKED_MATCHES_PER_DAY } from './game-rules.mjs';
 import { attachRealtimeServer } from './realtime.mjs';
 
 const DEFAULT_HOST = '0.0.0.0';
@@ -75,6 +76,33 @@ function closeHttpServer(server) {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
+}
+
+export async function getRealtimeIdentity(user, databasePool = pool) {
+  if (!user?.id) return null;
+  const profile = await databasePool.query(`
+    select profile.competitive_rating, profile.rating_games,
+           (
+             select count(*)::integer
+             from match_results as result
+             join matches on matches.id = result.match_id and matches.mode = 'human'
+             where result.user_id = profile.user_id
+               and result.created_at >= date_trunc('day', now())
+           ) as ranked_matches_today
+    from player_profiles as profile
+    where profile.user_id = $1
+  `, [user.id]);
+  const row = profile.rows[0];
+  const rankedMatchesToday = Number(row?.ranked_matches_today || 0);
+  return {
+    userId: user.id,
+    battleName: user.name,
+    competitiveRating: Number(row?.competitive_rating || 1200),
+    ratingGames: Number(row?.rating_games || 0),
+    rankedEligible: rankedMatchesToday < MAX_RANKED_MATCHES_PER_DAY,
+    rankedMatchesToday,
+    rankedMatchLimit: MAX_RANKED_MATCHES_PER_DAY,
+  };
 }
 
 function createMaintenanceScheduler({ env, logger, purgeAnalytics }) {
@@ -160,7 +188,7 @@ export function createBackendRuntime(options = {}) {
       if (!request.headers.cookie) return null;
       try {
         const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
-        return session?.user?.id || null;
+        return getRealtimeIdentity(session?.user, databasePool);
       } catch {
         return null;
       }
@@ -172,6 +200,8 @@ export function createBackendRuntime(options = {}) {
     getOnlineCount: () => realtime.getPresenceCount('stemegle:visitors'),
     notifyStats: () => realtime.publishDatabaseChange({ table: 'matches', event: 'INSERT' }),
     verifyMatchTicket: (ticket) => realtime.verifyMatchTicket(ticket),
+    completeMatchTicket: (ticket) => realtime.completeMatchTicket(ticket),
+    verifyChatReportToken: (report) => realtime.verifyChatReportToken(report),
   }));
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API route not found' });

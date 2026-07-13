@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { configuredOrigins, createBackendRuntime } from './index.mjs';
+import { configuredOrigins, createBackendRuntime, getRealtimeIdentity } from './index.mjs';
 
 function rawAuthHandler(req, res) {
   let body = '';
@@ -71,6 +71,32 @@ test('trusted realtime origins are normalized and production fails closed', () =
     () => configuredOrigins({ NODE_ENV: 'production' }),
     /BETTER_AUTH_URL is required/,
   );
+});
+
+test('realtime identity carries server-owned daily ranked eligibility', async () => {
+  const user = { id: 'user-id', name: 'Verified Player' };
+  const eligible = await getRealtimeIdentity(user, {
+    async query() {
+      return { rows: [{ competitive_rating: 1440, rating_games: 12, ranked_matches_today: 99 }] };
+    },
+  });
+  assert.deepEqual(eligible, {
+    userId: 'user-id',
+    battleName: 'Verified Player',
+    competitiveRating: 1440,
+    ratingGames: 12,
+    rankedEligible: true,
+    rankedMatchesToday: 99,
+    rankedMatchLimit: 100,
+  });
+
+  const capped = await getRealtimeIdentity(user, {
+    async query() {
+      return { rows: [{ competitive_rating: 1440, rating_games: 13, ranked_matches_today: 100 }] };
+    },
+  });
+  assert.equal(capped.rankedEligible, false);
+  assert.equal(capped.rankedMatchesToday, 100);
 });
 
 test('auth receives the raw body before JSON parsing and API requests are parsed afterward', async () => {

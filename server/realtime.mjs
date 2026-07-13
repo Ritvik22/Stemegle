@@ -19,7 +19,10 @@ const DEFAULT_MAX_CONNECTIONS = 10_000;
 // oversized client.
 const DEFAULT_MAX_CONNECTIONS_PER_IP = 250;
 const DEFAULT_MAX_MESSAGES_PER_MINUTE = 600;
+const DEFAULT_MAX_CHAT_MESSAGES_PER_MINUTE = 60;
 const DEFAULT_MATCH_TICKET_TTL_MS = 45 * 60 * 1000;
+const DEFAULT_CHAT_REPORT_TTL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_MAX_CHAT_REPORT_EVIDENCE = 10_000;
 const DEFAULT_MINIMUM_MATCH_DURATION_MS = 3000;
 const DEFAULT_QUESTION_TRANSITION_MS = 500;
 const DEFAULT_SERVER_START_DELAY_MS = 500;
@@ -39,6 +42,7 @@ const WIRE_ID_PATTERN = /^[A-Za-z0-9._~:-]+$/;
 const PARTY_TOPIC_PATTERN = /^stemegle:party:[A-Z0-9]{5}$/;
 const MATCH_TOPIC_PREFIX = 'stemegle:match:';
 const PARTY_TOPIC_PREFIX = 'stemegle:party:';
+const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;
 
 function jsonBytes(value) {
   return Buffer.byteLength(JSON.stringify(value));
@@ -122,7 +126,10 @@ function validatePresence(topic, presenceKey, presence) {
   }
 
   if (presence.playerId !== presenceKey) return 'Presence playerId must match its presence key.';
-  if (typeof presence.name !== 'string' || !presence.name.trim() || presence.name.length > 64) {
+  if (typeof presence.name !== 'string'
+    || !presence.name.trim()
+    || presence.name.length > 64
+    || CONTROL_CHARACTER_PATTERN.test(presence.name)) {
     return 'Presence name must be between 1 and 64 characters.';
   }
   if (!Number.isFinite(presence.joinedAt)) return 'Presence joinedAt must be a number.';
@@ -136,11 +143,18 @@ function validatePresence(topic, presenceKey, presence) {
 
 function validateChatPayload(state, payload) {
   if (payload.playerId !== state.presenceKey) return 'Chat playerId must match the sender.';
-  if (typeof payload.text !== 'string' || !payload.text.trim() || payload.text.length > MAX_CHAT_LENGTH) {
+  if (!validIdentifier(payload.id, 120, WIRE_ID_PATTERN)) return 'Chat message id is invalid.';
+  if (typeof payload.text !== 'string'
+    || !payload.text.trim()
+    || payload.text.length > MAX_CHAT_LENGTH
+    || CONTROL_CHARACTER_PATTERN.test(payload.text)) {
     return `Chat text must be between 1 and ${MAX_CHAT_LENGTH} characters.`;
   }
   if (payload.name !== undefined
-    && (typeof payload.name !== 'string' || !payload.name.trim() || payload.name.length > 64)) {
+    && (typeof payload.name !== 'string'
+      || !payload.name.trim()
+      || payload.name.length > 64
+      || CONTROL_CHARACTER_PATTERN.test(payload.name))) {
     return 'Chat name must be between 1 and 64 characters.';
   }
   return null;
@@ -182,7 +196,10 @@ export function attachRealtimeServer(httpServer, options = {}) {
     maxConnections = DEFAULT_MAX_CONNECTIONS,
     maxConnectionsPerIp = DEFAULT_MAX_CONNECTIONS_PER_IP,
     maxMessagesPerMinute = DEFAULT_MAX_MESSAGES_PER_MINUTE,
+    maxChatMessagesPerMinute = DEFAULT_MAX_CHAT_MESSAGES_PER_MINUTE,
     matchTicketTtlMs = DEFAULT_MATCH_TICKET_TTL_MS,
+    chatReportTtlMs = DEFAULT_CHAT_REPORT_TTL_MS,
+    maxChatReportEvidence = DEFAULT_MAX_CHAT_REPORT_EVIDENCE,
     minimumMatchDurationMs = DEFAULT_MINIMUM_MATCH_DURATION_MS,
     questionTransitionMs = DEFAULT_QUESTION_TRANSITION_MS,
     serverStartDelayMs = DEFAULT_SERVER_START_DELAY_MS,
@@ -191,11 +208,22 @@ export function attachRealtimeServer(httpServer, options = {}) {
   const originAllowlist = allowedOrigins === undefined
     ? null
     : new Set(allowedOrigins.map(normalizedOrigin).filter(Boolean));
+  const chatMessageLimit = Number.isInteger(maxChatMessagesPerMinute)
+    && maxChatMessagesPerMinute > 0
+    ? maxChatMessagesPerMinute
+    : DEFAULT_MAX_CHAT_MESSAGES_PER_MINUTE;
+  const chatEvidenceLimit = Number.isInteger(maxChatReportEvidence)
+    && maxChatReportEvidence > 0
+    ? maxChatReportEvidence
+    : DEFAULT_MAX_CHAT_REPORT_EVIDENCE;
   const wss = new WebSocketServer({ noServer: true, maxPayload });
   const topics = new Map();
   const revisions = new Map();
   const recentEvents = new Map();
   const matchTickets = new Map();
+  const rankedReservations = new Map();
+  const rankedReservationByUser = new Map();
+  const chatReportEvidence = new Map();
   const matchRuns = new Map();
   const ipConnections = new Map();
   let connectionCount = 0;
@@ -252,6 +280,65 @@ export function attachRealtimeServer(httpServer, options = {}) {
     broadcastPresence(topic);
   }
 
+  function quotaLimit(state) {
+    return Number.isInteger(state.rankedMatchLimit) && state.rankedMatchLimit > 0
+      ? state.rankedMatchLimit
+      : Number.MAX_SAFE_INTEGER;
+  }
+
+  function releaseRankedReservation(matchId, completed = false) {
+    const reservation = rankedReservations.get(matchId);
+    if (!reservation) return false;
+    rankedReservations.delete(matchId);
+
+    for (const participant of reservation.participants) {
+      if (rankedReservationByUser.get(participant.userId) === matchId) {
+        rankedReservationByUser.delete(participant.userId);
+      }
+      if (!completed) continue;
+
+      const completedCount = participant.rankedMatchesToday + 1;
+      for (const socket of wss.clients) {
+        const state = socket.realtimeState;
+        if (state?.userId !== participant.userId) continue;
+        state.rankedMatchesToday = Math.max(state.rankedMatchesToday ?? 0, completedCount);
+        state.rankedEligible = state.rankedMatchesToday < quotaLimit(state);
+        if (state.presence && state.topic === 'stemegle:lobby:v1') {
+          state.presence.rankedMatchesToday = state.rankedMatchesToday;
+          state.presence.rankedEligible = state.rankedEligible;
+          bumpPresence(state.topic);
+        }
+      }
+    }
+    return true;
+  }
+
+  function reserveRankedMatch(matchId, participantStates, expiresAt) {
+    const existing = rankedReservations.get(matchId);
+    if (existing) {
+      const reservedUsers = existing.participants.map(({ userId }) => userId).sort();
+      const currentUsers = participantStates.map(({ userId }) => userId).sort();
+      return reservedUsers.length === currentUsers.length
+        && reservedUsers.every((userId, index) => userId === currentUsers[index]);
+    }
+    const participants = participantStates.map((state) => ({
+      userId: state.userId,
+      rankedMatchesToday: Math.max(0, Number(state.rankedMatchesToday) || 0),
+      rankedMatchLimit: quotaLimit(state),
+    }));
+    if (participants.some((participant) => (
+      !participant.userId
+      || participant.rankedMatchesToday >= participant.rankedMatchLimit
+      || rankedReservationByUser.has(participant.userId)
+    ))) {
+      return false;
+    }
+
+    rankedReservations.set(matchId, { participants, expiresAt });
+    participants.forEach(({ userId }) => rankedReservationByUser.set(userId, matchId));
+    return true;
+  }
+
   function issueMatchTickets(topic) {
     const participants = matchParticipants(topic);
     if (!participants) return;
@@ -266,9 +353,13 @@ export function attachRealtimeServer(httpServer, options = {}) {
     const accountsMatchRun = !run || participantStates.every(
       (member) => run.participantUsers.get(member.presenceKey) === member.userId,
     );
-    const ranked = accountsMatchRun
+    const rankedCandidate = accountsMatchRun
       && authenticatedUsers.length === participants.length
-      && new Set(authenticatedUsers).size === participants.length;
+      && new Set(authenticatedUsers).size === participants.length
+      && participantStates.every((member) => member.rankedEligible === true);
+    const expiresAt = Date.now() + matchTicketTtlMs;
+    const ranked = rankedCandidate
+      && reserveRankedMatch(matchId, participantStates, expiresAt);
 
     for (const member of tracked) {
       if (member.matchTicket) continue;
@@ -279,7 +370,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
         playerId: member.presenceKey,
         userId: ranked ? member.userId : null,
         ranked,
-        expiresAt: Date.now() + matchTicketTtlMs,
+        expiresAt,
       };
       member.matchTicket = ticket;
       matchTickets.set(ticket, authorization);
@@ -389,6 +480,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
 
     state.channelId = message.channelId;
     state.topic = message.topic;
+    state.topicJoinedAt = Date.now();
     state.presenceKey = presenceEnabled ? message.presenceKey : null;
     state.presenceEnabled = presenceEnabled;
     state.selfBroadcast = message.selfBroadcast !== false;
@@ -420,7 +512,29 @@ export function attachRealtimeServer(httpServer, options = {}) {
     }
 
     // A heartbeat replaces this connection's meta; it must not append forever.
-    state.presence = message.state;
+    // Signed players cannot publish a forged account name or rating into the
+    // matchmaking pool. Those fields come from the authenticated server lookup.
+    const presence = { ...message.state };
+    if (state.userId && state.battleName && state.topic !== 'stemegle:visitors') {
+      presence.name = state.battleName;
+    }
+    if (state.topic === 'stemegle:lobby:v1') {
+      presence.joinedAt = state.topicJoinedAt;
+      presence.rating = state.competitiveRating ?? 1200;
+      presence.ratingGames = state.competitiveRating === null ? 0 : state.ratingGames;
+      presence.rankedEligible = state.userId ? state.rankedEligible === true : null;
+      presence.rankedMatchesToday = state.userId ? state.rankedMatchesToday : null;
+      presence.rankedMatchLimit = state.userId ? state.rankedMatchLimit : null;
+    } else if (state.userId && state.topic.startsWith(MATCH_TOPIC_PREFIX)) {
+      if (state.competitiveRating !== null) {
+        presence.rating = state.competitiveRating;
+        presence.ratingGames = state.ratingGames;
+      }
+      presence.rankedEligible = state.rankedEligible === true;
+      presence.rankedMatchesToday = state.rankedMatchesToday;
+      presence.rankedMatchLimit = state.rankedMatchLimit;
+    }
+    state.presence = presence;
     send(state, { type: 'ack', ref: message.ref });
     bumpPresence(state.topic);
     issueMatchTickets(state.topic);
@@ -434,13 +548,39 @@ export function attachRealtimeServer(httpServer, options = {}) {
     if (topic && hadPresence) bumpPresence(topic);
   }
 
-  function eventWasSeen(state, eventId) {
-    if (!eventId) return false;
+  function recentEventKey(state, event, eventId) {
+    return eventId ? `${state.topic}:${state.presenceKey || 'none'}:${event}:${eventId}` : '';
+  }
+
+  function eventWasSeen(state, event, eventId) {
+    const key = recentEventKey(state, event, eventId);
+    if (!key) return false;
+    const seenAt = recentEvents.get(key);
+    return seenAt !== undefined && Date.now() - seenAt < 60_000;
+  }
+
+  function rememberEvent(state, event, eventId) {
+    const key = recentEventKey(state, event, eventId);
+    if (key) recentEvents.set(key, Date.now());
+  }
+
+  function chatLimitReached(state) {
     const now = Date.now();
-    const key = `${state.topic}:${eventId}`;
-    const previous = recentEvents.get(key);
-    recentEvents.set(key, now);
-    return previous !== undefined && now - previous < 60000;
+    if (now - state.chatWindowStartedAt >= 60_000) {
+      state.chatWindowStartedAt = now;
+      state.chatsInWindow = 0;
+    }
+    state.chatsInWindow += 1;
+    return state.chatsInWindow > chatMessageLimit;
+  }
+
+  function storeChatReportEvidence(token, evidence) {
+    while (chatReportEvidence.size >= chatEvidenceLimit) {
+      const oldestToken = chatReportEvidence.keys().next().value;
+      if (!oldestToken) break;
+      chatReportEvidence.delete(oldestToken);
+    }
+    chatReportEvidence.set(token, evidence);
   }
 
   function validateBroadcastSender(state, event, payload) {
@@ -549,6 +689,10 @@ export function attachRealtimeServer(httpServer, options = {}) {
       sendError(state, message.ref, 'invalid_event_id', 'eventId is invalid.');
       return;
     }
+    if (eventWasSeen(state, message.event, message.eventId)) {
+      send(state, { type: 'ack', ref: message.ref });
+      return;
+    }
     const senderError = validateBroadcastSender(state, message.event, message.payload);
     if (senderError) {
       sendError(state, message.ref, 'forbidden_sender', senderError);
@@ -556,6 +700,15 @@ export function attachRealtimeServer(httpServer, options = {}) {
     }
 
     const participants = matchParticipants(state.topic);
+    const isChatEvent = participants
+      ? message.event === 'chat'
+      : state.topic.startsWith(PARTY_TOPIC_PREFIX) && message.event === 'party-chat';
+    if (isChatEvent && chatLimitReached(state)) {
+      sendError(state, message.ref, 'chat_rate_limited', 'Chat message rate limit exceeded.');
+      return;
+    }
+    rememberEvent(state, message.event, message.eventId);
+
     if (participants && message.event === 'start') {
       const matchId = state.topic.slice(MATCH_TOPIC_PREFIX.length);
       if (!matchRuns.has(matchId)) {
@@ -600,6 +753,33 @@ export function attachRealtimeServer(httpServer, options = {}) {
       progress.questionAvailableAt = Date.now() + questionTransitionMs;
     }
     let broadcastPayload = message.payload;
+    if (isChatEvent) {
+      const reportToken = randomBytes(32).toString('base64url');
+      const clientMessageId = message.payload.id;
+      const messageId = `chat-${randomBytes(16).toString('base64url')}`;
+      const channel = participants
+        ? `match:${state.topic.slice(MATCH_TOPIC_PREFIX.length)}`
+        : `party:${state.topic.slice(PARTY_TOPIC_PREFIX.length)}`;
+      const targetName = state.presence.name.trim().slice(0, 64);
+      broadcastPayload = {
+        id: messageId,
+        clientMessageId,
+        playerId: state.presenceKey,
+        name: targetName,
+        text: message.payload.text.trim().slice(0, MAX_CHAT_LENGTH),
+        at: Date.now(),
+        reportToken,
+      };
+      storeChatReportEvidence(reportToken, {
+        messageId: broadcastPayload.id,
+        targetPlayerId: state.presenceKey,
+        targetUserId: state.userId || null,
+        targetName,
+        channel,
+        excerpt: broadcastPayload.text.slice(0, 280),
+        expiresAt: Date.now() + chatReportTtlMs,
+      });
+    }
     if (participants && message.event === 'finish') {
       const matchId = state.topic.slice(MATCH_TOPIC_PREFIX.length);
       const run = matchRuns.get(matchId);
@@ -609,7 +789,6 @@ export function attachRealtimeServer(httpServer, options = {}) {
     }
 
     send(state, { type: 'ack', ref: message.ref });
-    if (eventWasSeen(state, message.eventId)) return;
     broadcastTopic(state.topic, {
       type: 'broadcast',
       topic: state.topic,
@@ -683,12 +862,21 @@ export function attachRealtimeServer(httpServer, options = {}) {
       presenceKey: null,
       presenceEnabled: false,
       presence: null,
+      topicJoinedAt: null,
       userId: request.realtimeUserId || null,
+      battleName: request.realtimeBattleName || '',
+      competitiveRating: request.realtimeCompetitiveRating ?? null,
+      ratingGames: request.realtimeRatingGames ?? 0,
+      rankedEligible: request.realtimeRankedEligible ?? null,
+      rankedMatchesToday: request.realtimeRankedMatchesToday ?? 0,
+      rankedMatchLimit: request.realtimeRankedMatchLimit ?? 0,
       selfBroadcast: true,
       isAlive: true,
       cleaned: false,
       messageWindowStartedAt: Date.now(),
       messagesInWindow: 0,
+      chatWindowStartedAt: Date.now(),
+      chatsInWindow: 0,
       matchTicket: null,
     };
     socket.realtimeState = state;
@@ -738,9 +926,37 @@ export function attachRealtimeServer(httpServer, options = {}) {
       return;
     }
     try {
-      request.realtimeUserId = await getSessionUserId(request);
+      const identity = await getSessionUserId(request);
+      if (identity && typeof identity === 'object') {
+        request.realtimeUserId = identity.userId || identity.id || null;
+        request.realtimeBattleName = typeof identity.battleName === 'string'
+          ? identity.battleName.slice(0, 64)
+          : '';
+        request.realtimeCompetitiveRating = Number.isInteger(identity.competitiveRating)
+          && identity.competitiveRating >= 100
+          && identity.competitiveRating <= 4000
+          ? identity.competitiveRating
+          : null;
+        request.realtimeRatingGames = Number.isInteger(identity.ratingGames)
+          && identity.ratingGames >= 0
+          ? identity.ratingGames
+          : 0;
+        request.realtimeRankedEligible = identity.rankedEligible !== false;
+        request.realtimeRankedMatchesToday = Number.isInteger(identity.rankedMatchesToday)
+          && identity.rankedMatchesToday >= 0
+          ? identity.rankedMatchesToday
+          : 0;
+        request.realtimeRankedMatchLimit = Number.isInteger(identity.rankedMatchLimit)
+          && identity.rankedMatchLimit > 0
+          ? identity.rankedMatchLimit
+          : 0;
+      } else {
+        request.realtimeUserId = identity || null;
+        request.realtimeRankedEligible = identity ? true : null;
+      }
     } catch {
       request.realtimeUserId = null;
+      request.realtimeRankedEligible = null;
     }
     if (socket.destroyed || closing) {
       if (!socket.destroyed) rejectUpgrade(socket, 503, 'Service Unavailable');
@@ -766,6 +982,12 @@ export function attachRealtimeServer(httpServer, options = {}) {
     const now = Date.now();
     for (const [ticket, authorization] of matchTickets) {
       if (authorization.expiresAt <= now) matchTickets.delete(ticket);
+    }
+    for (const [matchId, reservation] of rankedReservations) {
+      if (reservation.expiresAt <= now) releaseRankedReservation(matchId);
+    }
+    for (const [token, evidence] of chatReportEvidence) {
+      if (evidence.expiresAt <= now) chatReportEvidence.delete(token);
     }
     for (const [matchId, run] of matchRuns) {
       if (run.expiresAt <= now) matchRuns.delete(matchId);
@@ -804,6 +1026,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
     if (!authorization) return false;
     if (authorization.expiresAt <= Date.now()) {
       matchTickets.delete(ticket);
+      releaseRankedReservation(authorization.matchId);
       return false;
     }
     if (authorization.matchId !== matchId || authorization.playerId !== playerId) return null;
@@ -820,7 +1043,35 @@ export function attachRealtimeServer(httpServer, options = {}) {
     const score = run.scores.get(playerId);
     const opponentScore = run.scores.get(opponentId);
     if (!Number.isInteger(score) || !Number.isInteger(opponentScore)) return null;
-    return { ...authorization, pending: false, score, opponentScore };
+    const participants = run.participants.map((participantId) => {
+      const participantOpponentId = run.participants.find(
+        (candidate) => candidate !== participantId,
+      );
+      return {
+        playerId: participantId,
+        userId: run.participantUsers.get(participantId) || null,
+        score: run.scores.get(participantId),
+        opponentScore: run.scores.get(participantOpponentId),
+      };
+    });
+    return { ...authorization, pending: false, score, opponentScore, participants };
+  }
+
+  function completeMatchTicket({ ticket, matchId }) {
+    const authorization = matchTickets.get(ticket);
+    if (!authorization?.ranked || authorization.matchId !== matchId) return false;
+    return releaseRankedReservation(matchId, true);
+  }
+
+  function verifyChatReportToken({ token, reporterUserId }) {
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+    const evidence = chatReportEvidence.get(token);
+    if (!evidence || evidence.expiresAt <= Date.now()) {
+      if (evidence) chatReportEvidence.delete(token);
+      return null;
+    }
+    if (evidence.targetUserId && evidence.targetUserId === reporterUserId) return null;
+    return { ...evidence };
   }
 
   async function close() {
@@ -830,6 +1081,9 @@ export function attachRealtimeServer(httpServer, options = {}) {
     httpServer.off('upgrade', handleUpgrade);
     for (const socket of wss.clients) socket.terminate();
     matchTickets.clear();
+    rankedReservations.clear();
+    rankedReservationByUser.clear();
+    chatReportEvidence.clear();
     matchRuns.clear();
     await new Promise((resolve) => {
       wss.close(() => resolve());
@@ -843,6 +1097,8 @@ export function attachRealtimeServer(httpServer, options = {}) {
     close,
     getConnectionCount: () => connectionCount,
     verifyMatchTicket,
+    completeMatchTicket,
+    verifyChatReportToken,
     getPresenceCount(topic) {
       return new Set(
         [...(topics.get(topic) ?? [])]

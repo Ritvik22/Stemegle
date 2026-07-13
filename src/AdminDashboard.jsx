@@ -7,8 +7,11 @@ import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   ExternalLink,
+  Flag,
   Gamepad2,
   Globe2,
   Laptop,
@@ -19,15 +22,29 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  ShieldAlert,
   Smartphone,
   UserPlus,
   Users,
   XCircle,
   Zap,
 } from 'lucide-react';
-import { fetchAdminAccess, fetchAdminDashboard } from './lib/api';
+import {
+  fetchAdminAccess,
+  fetchAdminChatReports,
+  fetchAdminDashboard,
+  updateAdminChatReport,
+} from './lib/api';
 
 const RANGE_OPTIONS = [7, 30, 90, 365];
+const REPORT_PAGE_SIZE = 50;
+const REPORT_STATUS_OPTIONS = [
+  ['pending', 'Pending'],
+  ['all', 'All reports'],
+  ['actioned', 'Handled'],
+  ['dismissed', 'Dismissed'],
+  ['reviewed', 'Reviewed'],
+];
 const STAGE_OPTIONS = [
   ['all', 'All users'],
   ['signed_up', 'Signed up only'],
@@ -39,6 +56,10 @@ const STAGE_OPTIONS = [
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString();
+}
+
+function reportStatusLabel(status) {
+  return status === 'actioned' ? 'Handled' : String(status || 'Unknown').replaceAll('_', ' ');
 }
 
 function formatDate(value, includeTime = false) {
@@ -190,6 +211,8 @@ function demoData(days) {
     country_code: entry[4], city: entry[5], region: '', device_type: entry[6], browser: entry[7], operating_system: entry[8],
     highest_stage: entry[9], game_starts: entry[10], game_completions: entry[11], bot_completions: entry[12], human_completions: entry[13], party_completions: index === 3 ? 1 : 0,
     game_abandonments: entry[9] === 'abandoned' ? 1 : 0, queues: Math.max(entry[10], entry[9] === 'signed_up' ? 0 : 1),
+    learning_starts: index % 3, learning_completions: index % 4 === 0 ? 1 : 0,
+    learning_abandonments: index % 5 === 0 ? 1 : 0, learning_questions_answered: index * 3,
     pageviews: 4 + index * 3, sessions: 1 + index, total_score: index * 2840, wins: index + 1, losses: index,
     campaign: entry[2] === 'Google' ? 'summer-stem' : null, landing_path: '/', last_path: entry[9] === 'signed_up' ? '/' : '/game',
     last_event: entry[9] === 'completed' ? 'game_completed' : entry[9] === 'abandoned' ? 'game_abandoned' : 'page_view',
@@ -233,6 +256,17 @@ export default function AdminDashboard({ brand, session, authPending = false, on
   const [query, setQuery] = useState('');
   const [stage, setStage] = useState('all');
   const [expandedUser, setExpandedUser] = useState(null);
+  const [chatReports, setChatReports] = useState([]);
+  const [authorizedUserId, setAuthorizedUserId] = useState('');
+  const [reportStatus, setReportFilter] = useState('pending');
+  const [reportPage, setReportPage] = useState(0);
+  const [reportTotal, setReportTotal] = useState(0);
+  const [pendingReportTotal, setPendingReportTotal] = useState(0);
+  const [reportLoading, setReportLoading] = useState(true);
+  const [reportRefreshKey, setReportRefreshKey] = useState(0);
+  const [reportLoadError, setReportLoadError] = useState('');
+  const [reportUpdating, setReportUpdating] = useState('');
+  const [reportActionError, setReportActionError] = useState('');
   const demo = import.meta.env.DEV && new URLSearchParams(window.location.search).get('analytics-demo') === '1';
 
   useEffect(() => {
@@ -251,6 +285,7 @@ export default function AdminDashboard({ brand, session, authPending = false, on
         return;
       }
       if (!session) {
+        setAuthorizedUserId('');
         setData(null);
         setLoading(false);
         return;
@@ -259,15 +294,18 @@ export default function AdminDashboard({ brand, session, authPending = false, on
         const allowed = await fetchAdminAccess();
         if (!active) return;
         if (!allowed) {
+          setAuthorizedUserId('');
           setDenied(true);
           setData(null);
           return;
         }
+        setAuthorizedUserId(session.user.id);
         const dashboard = await fetchAdminDashboard(days);
         if (!active) return;
         setData(dashboard);
       } catch (loadError) {
         if (!active) return;
+        setAuthorizedUserId('');
         setData(null);
         if (loadError?.status === 403) {
           setDenied(true);
@@ -283,6 +321,66 @@ export default function AdminDashboard({ brand, session, authPending = false, on
     load();
     return () => { active = false; };
   }, [authPending, days, demo, refreshKey, session?.user?.id]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadReports() {
+      if (demo) {
+        setChatReports([]);
+        setReportTotal(0);
+        setPendingReportTotal(0);
+        setReportLoading(false);
+        return;
+      }
+      if (!session?.user?.id || authorizedUserId !== session.user.id) return;
+      setReportLoading(true);
+      setReportLoadError('');
+      const offset = reportPage * REPORT_PAGE_SIZE;
+      try {
+        const result = await fetchAdminChatReports({
+          status: reportStatus,
+          limit: REPORT_PAGE_SIZE,
+          offset,
+        });
+        if (!active) return;
+        const total = Number(result?.total || 0);
+        if (reportPage > 0 && offset >= total) {
+          setReportPage((page) => Math.max(0, page - 1));
+          return;
+        }
+        setChatReports(result?.reports || []);
+        setReportTotal(total);
+        setPendingReportTotal(Number(result?.pendingTotal || 0));
+      } catch (loadError) {
+        if (!active) return;
+        setChatReports([]);
+        setReportTotal(0);
+        setReportLoadError(loadError?.message || 'Chat reports could not be loaded. Analytics data is still available.');
+      } finally {
+        if (active) setReportLoading(false);
+      }
+    }
+    loadReports();
+    return () => { active = false; };
+  }, [authorizedUserId, demo, reportPage, reportRefreshKey, reportStatus, refreshKey, session?.user?.id]);
+
+  async function setReportStatus(reportId, status) {
+    setReportUpdating(reportId);
+    setReportActionError('');
+    try {
+      const result = await updateAdminChatReport(reportId, status);
+      setChatReports((current) => current.map((report) => (
+        report.id === reportId
+          ? { ...report, status: result.report.status, reviewedAt: result.report.reviewedAt }
+          : report
+      )));
+      setReportRefreshKey((key) => key + 1);
+    } catch (actionError) {
+      setReportActionError(actionError?.message || 'The report status could not be updated.');
+    } finally {
+      setReportUpdating('');
+    }
+  }
 
   const users = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -400,6 +498,50 @@ export default function AdminDashboard({ brand, session, authPending = false, on
           <article className="analytics-panel"><div className="analytics-panel-head"><div><p className="eyebrow">GEOGRAPHY</p><h2>Country hints</h2></div><MapPin /></div><RankedBars rows={data.countries || []} /></article>
         </section>
 
+        <section className="moderation-section" aria-labelledby="moderation-title">
+          <div className="moderation-head">
+            <div><p className="eyebrow">CHAT SAFETY</p><h2 id="moderation-title">Player reports</h2><p>Review messages reported from matches and parties. Muting remains private to the reporting player.</p></div>
+            <div className="moderation-tools">
+              <label><span className="sr-only">Filter player reports</span><select value={reportStatus} onChange={(event) => { setReportFilter(event.target.value); setReportPage(0); }} disabled={reportLoading}>{REPORT_STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><ChevronDown aria-hidden="true" /></label>
+              <span aria-live="polite"><ShieldAlert aria-hidden="true" /> {formatNumber(pendingReportTotal)} pending</span>
+            </div>
+          </div>
+          <div className="moderation-list">
+            {(reportLoadError || reportActionError) && <p className="moderation-error" role="alert">{reportLoadError || reportActionError}</p>}
+            {reportLoading && <p className="analytics-empty" role="status">Loading player reports...</p>}
+            {!reportLoading && chatReports.map((report) => {
+              const targetLabel = report.targetAccount?.battleName || report.targetName || 'reported player';
+              return (
+                <article className="moderation-row" key={report.id}>
+                  <span className={`moderation-status is-${report.status}`}><Flag aria-hidden="true" /> {reportStatusLabel(report.status)}</span>
+                  <div className="moderation-message"><strong>{targetLabel}</strong><blockquote>{report.excerpt || 'No message excerpt was retained.'}</blockquote><small>{report.targetAccount ? `Verified account · ${report.reason.replaceAll('_', ' ')}` : report.reason.replaceAll('_', ' ')} · {report.channel} · {formatDate(report.createdAt, true)}</small></div>
+                  <div className="moderation-reporter"><small>Reported by</small><strong>{report.reporter?.battleName || 'Unknown player'}</strong></div>
+                  <div className="moderation-actions">
+                    {report.status === 'pending' ? (
+                      <>
+                        <button type="button" aria-label={`Dismiss report about ${targetLabel}`} disabled={reportUpdating === report.id} onClick={() => setReportStatus(report.id, 'dismissed')}>Dismiss</button>
+                        <button type="button" aria-label={`Mark report about ${targetLabel} as handled`} disabled={reportUpdating === report.id} onClick={() => setReportStatus(report.id, 'actioned')}><ShieldCheck aria-hidden="true" /> Mark handled</button>
+                      </>
+                    ) : report.status === 'reviewed'
+                      ? <span className="moderation-reviewed">Reviewed {formatDate(report.reviewedAt, true)}</span>
+                      : <button type="button" aria-label={`Mark report about ${targetLabel} as reviewed`} disabled={reportUpdating === report.id} onClick={() => setReportStatus(report.id, 'reviewed')}>Mark reviewed</button>}
+                  </div>
+                </article>
+              );
+            })}
+            {!reportLoading && !chatReports.length && !reportLoadError && <p className="analytics-empty">No {reportStatus === 'all' ? '' : `${reportStatusLabel(reportStatus).toLowerCase()} `}chat reports found.</p>}
+          </div>
+          {!reportLoading && reportTotal > 0 && (
+            <div className="moderation-pagination">
+              <span>Showing {formatNumber(reportPage * REPORT_PAGE_SIZE + 1)}-{formatNumber(Math.min(reportTotal, (reportPage + 1) * REPORT_PAGE_SIZE))} of {formatNumber(reportTotal)}</span>
+              <div>
+                <button type="button" onClick={() => setReportPage((page) => Math.max(0, page - 1))} disabled={reportPage === 0} aria-label="Previous report page"><ChevronLeft aria-hidden="true" /> Previous</button>
+                <button type="button" onClick={() => setReportPage((page) => page + 1)} disabled={(reportPage + 1) * REPORT_PAGE_SIZE >= reportTotal} aria-label="Next report page">Next <ChevronRight aria-hidden="true" /></button>
+              </div>
+            </div>
+          )}
+        </section>
+
         <section className="analytics-users-section">
           <div className="analytics-users-head">
             <div><p className="eyebrow">SIGNED-UP PLAYERS</p><h2>Every account and its journey</h2><p>{formatNumber(data.users_total)} total accounts. Historical accounts show unknown attribution until they return.</p></div>
@@ -435,6 +577,7 @@ export default function AdminDashboard({ brand, session, authPending = false, on
                           <div><span>Acquisition</span><strong>{user.referral_source || 'Unknown'}{user.referral_medium ? ` / ${user.referral_medium}` : ''}</strong><small>{user.campaign ? `Campaign ${user.campaign}` : 'No campaign tagged'}</small></div>
                           <div><span>First device</span><strong>{[user.device_type, user.browser, user.operating_system].filter(Boolean).join(' / ') || 'Unknown'}</strong><small>{[user.city, user.region, user.country_code, user.timezone].filter(Boolean).join(', ') || 'Location unavailable'}</small></div>
                           <div><span>Gameplay</span><strong>{formatNumber(user.game_completions)} completed, {formatNumber(user.game_abandonments)} left</strong><small>{formatNumber(user.human_completions)} human / {formatNumber(user.bot_completions)} bot / {formatNumber(user.party_completions)} party</small></div>
+                          <div><span>Learning</span><strong>{formatNumber(user.learning_completions)} completed, {formatNumber(user.learning_abandonments)} left</strong><small>{formatNumber(user.learning_starts)} lessons started / {formatNumber(user.learning_questions_answered)} questions answered</small></div>
                           <div><span>Ranked record</span><strong>{formatNumber(user.total_score)} score</strong><small>{formatNumber(user.wins)} wins / {formatNumber(user.losses)} losses / {formatNumber(user.ranked_matches)} ranked</small></div>
                           <div><span>Account activity</span><strong>Last sign-in {formatDate(user.last_sign_in_at, true)}</strong><small>First seen {formatDate(user.first_seen_at, true)} / last screen {user.last_path || 'Unknown'}</small></div>
                           <div><span>Contact</span><strong>{user.email || 'No email provided'}</strong><small>{user.contact_email ? 'Optional contact email, not yet verified' : user.email ? 'Account email' : 'Battle-name login only'}</small></div>

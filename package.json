@@ -17,6 +17,7 @@
     "db:migrate:local": "node --env-file=.env.local scripts/apply-migrations.mjs",
     "db:import-legacy": "node scripts/import-legacy-public.mjs",
     "smoke:leaderboard": "node scripts/leaderboard-smoke.mjs",
+    "smoke:progression": "node scripts/progression-smoke.mjs",
     "check:questions": "node scripts/question-bank-check.mjs",
     "smoke:realtime": "node scripts/realtime-smoke.mjs"
   },

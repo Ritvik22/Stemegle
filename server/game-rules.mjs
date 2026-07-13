@@ -1,0 +1,1 @@
+export const MAX_RANKED_MATCHES_PER_DAY = 100;
