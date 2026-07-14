@@ -388,12 +388,16 @@ function appendChatMessage(current, msg) {
   return [...current.slice(-(CHAT_HISTORY_CAP - 1)), { ...msg, text: msg.text.slice(0, CHAT_MAX_LENGTH) }];
 }
 
-function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
-  const [open, setOpen] = useState(false);
+function ChatDock({ title, scopeLabel, messages, onSend, selfId, autoOpen = false, centered = false }) {
+  const [open, setOpen] = useState(autoOpen);
   const [text, setText] = useState('');
   const [unread, setUnread] = useState(0);
   const listRef = useRef(null);
   const seenCount = useRef(messages.length);
+
+  useEffect(() => {
+    if (autoOpen) setOpen(true);
+  }, [autoOpen]);
 
   useEffect(() => {
     if (open) {
@@ -415,14 +419,14 @@ function ChatDock({ title, scopeLabel, messages, onSend, selfId }) {
 
   if (!open) {
     return (
-      <button className="chat-fab" onClick={() => setOpen(true)} aria-label={`Open ${title} chat`}>
+      <button className={centered ? 'chat-fab chat-centered' : 'chat-fab'} onClick={() => setOpen(true)} aria-label={`Open ${title} chat`}>
         <MessageCircle size={17} /> Chat{unread > 0 && <i className="chat-unread">{unread > 9 ? '9+' : unread}</i>}
       </button>
     );
   }
 
   return (
-    <section className="chat-dock" aria-label={`${title} chat`}>
+    <section className={centered ? 'chat-dock chat-centered' : 'chat-dock'} aria-label={`${title} chat`}>
       <div className="chat-head">
         <strong><MessageCircle size={14} /> {title}</strong>
         <button onClick={() => setOpen(false)} aria-label="Minimize chat"><X size={15} /></button>
@@ -1881,7 +1885,7 @@ function Game({ player, match, onFinish, onExit }) {
         <div className={feedback ? 'feedback show' : 'feedback'} role="status">{feedback}</div>
         {!started && <div className="match-countdown"><span>RIVAL CONNECTED</span><strong>Get ready…</strong></div>}
       </section>
-      {!match.isBot && <ChatDock title="Match chat" scopeLabel="you and your rival" messages={chatMessages} onSend={sendChat} selfId={match.playerId} />}
+      {!match.isBot && <ChatDock title="Live match chat" scopeLabel="you and your rival" messages={chatMessages} onSend={sendChat} selfId={match.playerId} autoOpen centered />}
     </main>
   );
 }
@@ -2289,7 +2293,7 @@ export default function App() {
   return <>
     {content}
     {modalContent}
-    {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} />}
+    {inParty && (screen === 'party' || screen === 'party-game') && <ChatDock title={`Party ${partyCode}`} scopeLabel="your party" messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} autoOpen={screen === 'party-game'} centered={screen === 'party-game'} />}
     {showPartyPill && <PartyPill code={partyCode} count={party.players.length} onReturn={() => setScreen('party')} onLeave={() => setConfirmLeave(true)} />}
     {confirmLeave && <ConfirmDialog title="Leave the party?" message="Are you sure you want to leave the party? You'll need the invite link or code to rejoin." confirmLabel="Leave party" onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}
   </>;
