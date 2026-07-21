@@ -67,3 +67,41 @@ export function fetchAdminDashboard(days) {
   const range = Math.max(1, Math.min(Number(days) || 30, 3650));
   return request(`/api/admin/analytics?days=${range}`);
 }
+
+export async function fetchQuestionPacks() {
+  const result = await request('/api/question-packs');
+  return result?.packs || [];
+}
+
+export async function fetchQuestionPack(packId) {
+  const result = await request(`/api/question-packs/${encodeURIComponent(packId)}`);
+  return result?.pack || null;
+}
+
+export async function saveQuestionPack(pack) {
+  const path = pack.id
+    ? `/api/question-packs/${encodeURIComponent(pack.id)}`
+    : '/api/question-packs';
+  return request(path, {
+    method: pack.id ? 'PUT' : 'POST',
+    body: JSON.stringify({ title: pack.title, questions: pack.questions }),
+  });
+}
+
+export function deleteQuestionPack(packId) {
+  return request(`/api/question-packs/${encodeURIComponent(packId)}`, { method: 'DELETE' });
+}
+
+export async function uploadQuestionPackImage(file) {
+  const response = await fetch('/api/question-pack-images', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': file.type },
+    body: file,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new ApiError(data?.error || `Upload failed with status ${response.status}`, response.status, data);
+  }
+  return data;
+}
