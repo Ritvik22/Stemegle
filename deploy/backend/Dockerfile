@@ -9,6 +9,11 @@ COPY --chown=node:node server ./server
 COPY --chown=node:node src/data ./src/data
 COPY --chown=node:node src/lib/accountIdentity.js ./src/lib/accountIdentity.js
 
+# Consume the service build context so Compose includes the isolated runner in
+# the backend build graph. The marker is not retained in the backend image.
+COPY --from=codegle_runner /usr/local/bin/codegle-sandbox /tmp/codegle-sandbox-marker
+RUN rm /tmp/codegle-sandbox-marker
+
 ENV NODE_ENV=production
 ENV NODE_OPTIONS=--enable-source-maps
 EXPOSE 8787
