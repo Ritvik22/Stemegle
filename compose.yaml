@@ -63,11 +63,6 @@ services:
     build:
       context: ${APP_SOURCE_DIR:-.}
       dockerfile: deploy/backend/Dockerfile
-      # The currently running webhook may use the previous deploy script on
-      # the first Codegle rollout. Making the runner a build context forces
-      # `docker compose build backend` to build/tag it first as well.
-      additional_contexts:
-        codegle_runner: service:code-runner
     image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-backend:latest
     restart: unless-stopped
     init: true

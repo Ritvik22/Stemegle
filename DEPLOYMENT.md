@@ -52,9 +52,10 @@ Validate and build the stack:
 
 ```bash
 docker compose config --quiet
-docker compose build migrate backend backup app
+docker compose build validate migrate code-runner backend backup app
+docker compose --profile validation run --rm validate
 docker compose up -d --wait db
-docker compose up -d --wait backend backup app
+docker compose up -d --wait code-runner backend backup app
 ```
 
 The backend waits for the ordered SQL migrations to finish. Verify it through
@@ -133,13 +134,13 @@ Replacing the live database is intentionally gated and creates another safety
 backup first:
 
 ```bash
-docker compose stop app backend backup
+docker compose stop app backend backup code-runner
 RESTORE_DATABASE=stemegle \
 RESTORE_CONFIRM=restore:stemegle \
 docker compose --profile restore run --rm restore \
   /backups/stemegle_TIMESTAMP.dump stemegle
 docker compose run --rm migrate
-docker compose up -d --wait backend backup app
+docker compose up -d --wait code-runner backend backup app
 ```
 
 The fresh migration run is required: an older archive also contains its older
@@ -151,9 +152,9 @@ can start new application code against an old schema.
 The webhook service checks out `DEPLOY_BRANCH`, validates Compose, runs tests,
 checks all 5,624 questions, performs a production frontend build, builds the new
 images, starts PostgreSQL, creates a verified pre-migration backup, applies
-migrations, and only then replaces the backend and app containers. It captures
-the image IDs of the running services and restores them if any replacement or
-end-to-end health check fails.
+migrations, and only then replaces the runner, backend, and app containers. It
+captures the image IDs of the running services and restores them if any
+replacement or end-to-end health check fails.
 
 ```dotenv
 DEPLOY_REPO=Ritvik22/Stemegle
@@ -165,6 +166,16 @@ Start it with:
 
 ```bash
 docker compose --profile autodeploy up -d --build autodeploy
+```
+
+The webhook image contains the deployment script. After changing anything in
+`deploy/webhook/`, rebuild and force-recreate `autodeploy` so future pushes do
+not keep using stale orchestration. On a production layout whose checkout is in
+`./source`, run these commands from the deployment root:
+
+```bash
+APP_SOURCE_DIR=./source docker compose --profile autodeploy build autodeploy
+APP_SOURCE_DIR=./source docker compose --profile autodeploy up -d --no-build --no-deps --force-recreate autodeploy
 ```
 
 Change `DEPLOY_BRANCH` only after the intended branch is pushed and its staging
@@ -183,7 +194,7 @@ STEMEGLE_BACKEND_PORT=18787 \
 POSTGRES_PORT=55432 \
 BETTER_AUTH_URL=http://127.0.0.1:18097 \
 APP_ALLOWED_ORIGINS=http://localhost:18097 \
-docker compose up -d --build --wait backend backup app
+docker compose up -d --build --wait code-runner backend backup app
 ```
 
 Never point staging at the production `postgres_data` volume.
