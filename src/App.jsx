@@ -7,7 +7,9 @@ import {
   Bolt,
   BrainCircuit,
   Check,
+  ChevronDown,
   ChevronRight,
+  CircleHelp,
   CircleUserRound,
   Clock3,
   Crown,
@@ -18,6 +20,7 @@ import {
   Hash,
   ImagePlus,
   Lock,
+  LogOut,
   Copy,
   GitBranch,
   Medal,
@@ -30,6 +33,7 @@ import {
   Sparkles,
   Swords,
   Trophy,
+  UserPlus,
   Users,
   X,
   Zap,
@@ -527,31 +531,60 @@ function CloudflareBadge() {
 
 function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame }) {
   const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
+  const runAndClose = (action) => () => {
+    setOpen(false);
+    action();
+  };
+
   return (
     <header className="site-header">
       <Logo />
-      <nav className={open ? 'nav open' : 'nav'} aria-label="Main navigation">
-        <a href="#how" onClick={() => setOpen(false)}>How it works</a>
-        <a href="#party" onClick={() => setOpen(false)}>Party</a>
-        <a href="#leaderboard" onClick={() => setOpen(false)}>Leaderboard</a>
-        {accountName ? (
-          <>
-            <span className="account-pill"><i>{playerInitial(accountName)}</i><span><small>SIGNED IN</small>{accountName}</span></span>
-            <button className="nav-login" onClick={onPacks}><BookOpen size={15} /> My packs</button>
-            {canViewAdmin && <button className="nav-login" onClick={onAdmin}><BarChart3 size={15} /> Analytics</button>}
-            <button className="nav-login" onClick={onLogout}>Log out</button>
-            <button className="button button-small" onClick={onAccountPlay}>Play now <ArrowRight size={15} /></button>
-          </>
-        ) : (
-          <>
-            <button className="nav-login" onClick={onJoinGame}><Hash size={15} /> Join PIN</button>
-            <button className="nav-login" onClick={onLogin}>Log in</button>
-            <button className="nav-guest" onClick={onGuest}>Guest play</button>
-            <button className="button button-small" onClick={onCreate}>Create account <ArrowRight size={15} /></button>
-          </>
-        )}
-      </nav>
-      <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation" aria-expanded={open}>{open ? <X /> : <Menu />}</button>
+      <div className="header-actions">
+        <a className="header-action" href="#leaderboard"><Trophy size={16} /><span>Leaderboard</span></a>
+        {!accountName && <button className="header-action" onClick={onLogin}><CircleUserRound size={17} /><span>Log in</span></button>}
+        {!accountName && <button className="button button-small header-create" onClick={onCreate}><UserPlus size={16} /><span>Create account</span></button>}
+        <div className="header-menu" ref={menuRef}>
+          <button className={open ? 'menu-button open' : 'menu-button'} onClick={() => setOpen((current) => !current)} aria-label="More navigation" aria-expanded={open} aria-controls="header-more-menu">
+            {open ? <X size={18} /> : <Menu size={18} />}<span>More</span><ChevronDown className="menu-chevron" size={14} />
+          </button>
+          {open && (
+            <nav className="menu-panel" id="header-more-menu" aria-label="More navigation">
+              {accountName && <span className="menu-account"><i>{playerInitial(accountName)}</i><span><small>SIGNED IN</small>{accountName}</span></span>}
+              <a className="menu-item" href="#how" onClick={() => setOpen(false)}><CircleHelp size={17} /><span><strong>How it works</strong><small>Learn the game in three steps</small></span></a>
+              <a className="menu-item" href="#party" onClick={() => setOpen(false)}><Users size={17} /><span><strong>Party</strong><small>Play teams or tournaments</small></span></a>
+              <button className="menu-item" onClick={runAndClose(onJoinGame)}><Hash size={17} /><span><strong>Join PIN</strong><small>Enter a hosted game code</small></span></button>
+              {accountName ? (
+                <>
+                  <button className="menu-item" onClick={runAndClose(onPacks)}><BookOpen size={17} /><span><strong>My packs</strong><small>Create and host questions</small></span></button>
+                  {canViewAdmin && <button className="menu-item" onClick={runAndClose(onAdmin)}><BarChart3 size={17} /><span><strong>Analytics</strong><small>View Stemegle activity</small></span></button>}
+                  <button className="menu-item menu-play" onClick={runAndClose(onAccountPlay)}><Rocket size={17} /><span><strong>Play now</strong><small>Find a live opponent</small></span></button>
+                  <button className="menu-item menu-logout" onClick={runAndClose(onLogout)}><LogOut size={17} /><span><strong>Log out</strong><small>End this account session</small></span></button>
+                </>
+              ) : (
+                <button className="menu-item menu-play" onClick={runAndClose(onGuest)}><Play size={17} /><span><strong>Guest play</strong><small>Jump in with just a name</small></span></button>
+              )}
+            </nav>
+          )}
+        </div>
+      </div>
     </header>
   );
 }
