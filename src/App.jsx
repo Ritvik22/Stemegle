@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
   Atom,
@@ -11,6 +11,7 @@ import {
   ChevronRight,
   CircleHelp,
   CircleUserRound,
+  Code2,
   Clock3,
   Crown,
   Eye,
@@ -51,6 +52,7 @@ import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime'
 import { getQuestionsForMatch } from './data/questions';
 
 const LOBBY_CHANNEL = 'stemegle:lobby:v1';
+const CodegleView = lazy(() => import('./Codegle'));
 const PARTY_PREFIX = 'stemegle:party:';
 const PARTY_CODE_LENGTH = 5;
 const PARTY_HEARTBEAT_INTERVAL_MS = 5000;
@@ -529,7 +531,7 @@ function CloudflareBadge() {
   );
 }
 
-function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame }) {
+function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame, onCodegle }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -570,6 +572,7 @@ function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin
               {accountName && <span className="menu-account"><i>{playerInitial(accountName)}</i><span><small>SIGNED IN</small>{accountName}</span></span>}
               <a className="menu-item" href="#how" onClick={() => setOpen(false)}><CircleHelp size={17} /><span><strong>How it works</strong><small>Learn the game in three steps</small></span></a>
               <a className="menu-item" href="#party" onClick={() => setOpen(false)}><Users size={17} /><span><strong>Party</strong><small>Play teams or tournaments</small></span></a>
+              <button className="menu-item menu-codegle" onClick={runAndClose(onCodegle)}><Code2 size={17} /><span><strong>Codegle <i>BETA</i></strong><small>Race on a coding problem</small></span></button>
               <button className="menu-item" onClick={runAndClose(onJoinGame)}><Hash size={17} /><span><strong>Join PIN</strong><small>Enter a hosted game code</small></span></button>
               {accountName ? (
                 <>
@@ -2050,11 +2053,11 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty, b
   );
 }
 
-function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame }) {
+function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame, onCodegle }) {
   return (
     <div id="top">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} onPacks={onPacks} onJoinGame={onJoinGame} />
+      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} onPacks={onPacks} onJoinGame={onJoinGame} onCodegle={onCodegle} />
       <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
         <span className="leaderboard-fab-icon"><Trophy aria-hidden="true" /></span>
         <span><small>{accountRank ? `YOUR RANK · #${accountRank.rank_position}` : 'LIVE GLOBAL RANKS'}</small><strong>{accountRank ? 'Climb even higher' : 'Can you take the top spot?'}</strong></span>
@@ -2086,6 +2089,7 @@ function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPla
                   <button className="button button-secondary button-large" onClick={onGuest}><Play size={18} aria-hidden="true" /> Play as guest</button>
                 </>
               )}
+              <button className="button button-large codegle-launch" onClick={onCodegle}><Code2 size={18} /> Codegle <small>BETA</small></button>
             </div>
             <p className="fine-print"><Check size={14} aria-hidden="true" /> Free to play <Check size={14} aria-hidden="true" /> No download <Check size={14} aria-hidden="true" /> Match in seconds</p>
           </div>
@@ -2200,6 +2204,10 @@ export default function App() {
       'pin-join': '/join',
       'pack-room': '/hosted-game',
       'party-game': '/party/game',
+      'codegle-intro': '/codegle',
+      'codegle-matchmaking': '/codegle/matchmaking',
+      'codegle-game': '/codegle/game',
+      'codegle-results': '/codegle/results',
       game: '/game',
       results: '/results',
     };
@@ -2209,7 +2217,7 @@ export default function App() {
   useEffect(() => {
     const handlePopState = () => {
       if (window.location.pathname.startsWith('/admin')) {
-        if (['game', 'matchmaking', 'party-game'].includes(screenRef.current)) {
+        if (['game', 'matchmaking', 'party-game', 'codegle-matchmaking', 'codegle-game'].includes(screenRef.current)) {
           window.history.replaceState(null, '', '/');
           return;
         }
@@ -2233,13 +2241,18 @@ export default function App() {
       : { roomKind: 'party' },
     onGameStart: (config) => {
       // Don't yank members out of an active ranked match or queue.
-      if (screenRef.current === 'game' || screenRef.current === 'matchmaking') return;
+      if (['game', 'matchmaking', 'codegle-game', 'codegle-matchmaking'].includes(screenRef.current)) return;
       setResult(null);
       setMatch(config);
       setScreen('party-game');
     },
   });
   const handleMatched = useCallback((matchData) => { setMatch(matchData); setOpponent(matchData.opponent.name); setScreen('game'); }, []);
+  const handleCodegleMatched = useCallback((matchData) => {
+    setMatch(matchData);
+    setOpponent(matchData.opponent.name);
+    setScreen('codegle-game');
+  }, []);
   const handlePlayBot = useCallback(() => {
     const botMatch = createBotMatch(player);
     trackAnalyticsEvent('bot_selected', { game_id: botMatch.id, mode: 'bot' });
@@ -2293,8 +2306,19 @@ export default function App() {
     setScreen('results');
   }, [match?.analyticsId, match?.playerId]);
 
+  const handleCodegleFinish = useCallback((data) => {
+    trackAnalyticsEvent('game_completed', {
+      game_id: match?.id,
+      attempt_id: `${match?.id}:${match?.playerId}`,
+      mode: 'codegle',
+      outcome: data.won ? 'win' : 'loss',
+    });
+    setResult(data);
+    setScreen('codegle-results');
+  }, [match?.id, match?.playerId]);
+
   useEffect(() => {
-    if (screen === 'game' || screen === 'party-game') return undefined;
+    if (screen === 'game' || screen === 'party-game' || screen === 'codegle-game') return undefined;
     const renderAppState = () => JSON.stringify({
       mode: screen,
       player: player || null,
@@ -2404,6 +2428,17 @@ export default function App() {
     setGuestDestination('matchmaking');
     setModal('guest');
   }
+  function openCodegle() {
+    setScreen('codegle-intro');
+  }
+  function playCodegle() {
+    if (accountName) {
+      start(accountName, 'codegle-matchmaking');
+      return;
+    }
+    setGuestDestination('codegle-matchmaking');
+    setModal('guest');
+  }
   function openPacks() {
     if (accountName) {
       setScreen('packs');
@@ -2463,6 +2498,7 @@ export default function App() {
     setScreen('landing');
   }
   function rematch() { setResult(null); setMatch(null); setScreen('matchmaking'); }
+  function rematchCodegle() { setResult(null); setMatch(null); setScreen('codegle-matchmaking'); }
   function home() {
     if (window.location.pathname.startsWith('/admin')) window.history.replaceState(null, '', '/');
     setScreen('landing');
@@ -2473,7 +2509,8 @@ export default function App() {
   async function logout() { await authClient.signOut(); leaveParty(); home(); }
 
   const inParty = Boolean(partyCode && player);
-  const showRoomPill = inParty && screen !== 'party' && screen !== 'pack-room' && screen !== 'party-game' && screen !== 'game' && screen !== 'admin';
+  const showRoomPill = inParty
+    && !['party', 'pack-room', 'party-game', 'game', 'admin', 'codegle-intro', 'codegle-matchmaking', 'codegle-game', 'codegle-results'].includes(screen);
 
   let content;
   if (screen === 'admin') content = <AdminDashboard brand={<Logo />} session={session} authPending={authPending} onBack={closeAdmin} onLogin={() => setModal('login')} onLogout={logout} />;
@@ -2481,13 +2518,17 @@ export default function App() {
   else if (screen === 'pin-join') content = <GamePinJoin initialPin={pendingJoinPin.current} onBack={home} onJoin={submitGamePin} />;
   else if (screen === 'pack-room' && partyCode) content = <HostedPackRoom code={partyCode} pack={hostedPack} party={party} playerId={partyPlayerId.current} onLeave={() => { leaveParty(); home(); }} onBack={home} createTeamConfig={createPackTeamConfig} createTournamentConfig={createPackTournamentConfig} />;
   else if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={cancelMatchmaking} />;
+  else if (screen === 'codegle-intro') content = <Suspense fallback={<main className="codegle-loading">Loading Codegle…</main>}><CodegleView view="intro" onBack={home} onPlay={playCodegle} /></Suspense>;
+  else if (screen === 'codegle-matchmaking') content = <Suspense fallback={<main className="codegle-loading">Joining the Codegle queue…</main>}><CodegleView view="matchmaking" name={player} onMatched={handleCodegleMatched} onCancel={home} /></Suspense>;
+  else if (screen === 'codegle-game' && match) content = <Suspense fallback={<main className="codegle-loading">Preparing the editor…</main>}><CodegleView view="game" player={player} match={match} onFinish={handleCodegleFinish} onExit={home} /></Suspense>;
+  else if (screen === 'codegle-results' && result) content = <Suspense fallback={<main className="codegle-loading">Loading results…</main>}><CodegleView view="results" result={result} onRematch={rematchCodegle} onHome={home} /></Suspense>;
   else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;
   else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={handlePartyFinish} onExit={() => setScreen(inParty ? (roomKind === 'pack' ? 'pack-room' : 'party') : 'landing')} />;
   else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen(roomKind === 'pack' ? 'pack-room' : 'party') : undefined} backLabel={roomKind === 'pack' ? 'Back to game room' : 'Back to party'} />;
-  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} onPacks={openPacks} onJoinGame={openPinJoin} />;
+  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} onPacks={openPacks} onJoinGame={openPinJoin} onCodegle={openCodegle} />;
 
-  const modalContent = modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : guestDestination === 'pack-room' ? 'Join game' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : guestDestination === 'pack-room' ? 'Pick a name so the host and other players can recognize you.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
+  const modalContent = modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : guestDestination === 'pack-room' ? 'Join game' : guestDestination === 'codegle-matchmaking' ? 'Enter Codegle queue' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : guestDestination === 'pack-room' ? 'Pick a name so the host and other players can recognize you.' : guestDestination === 'codegle-matchmaking' ? 'Pick a name for the separate live coding queue.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
       const invite = guestDestination === 'party' ? pendingInvite.current : guestDestination === 'pack-room' ? (pendingJoinPin.current || pendingGameInvite.current) : '';
       pendingInvite.current = '';
       pendingGameInvite.current = '';

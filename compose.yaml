@@ -72,6 +72,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      code-runner:
+        condition: service_healthy
     environment:
       <<: *database-url
       NODE_ENV: production
@@ -83,6 +85,7 @@ services:
       APP_ALLOWED_ORIGINS: ${APP_ALLOWED_ORIGINS:-}
       ANALYTICS_RETENTION_DAYS: ${ANALYTICS_RETENTION_DAYS:-400}
       DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-12}
+      CODE_RUNNER_URL: http://code-runner:8080
     expose:
       - "8787"
     ports:
@@ -95,6 +98,41 @@ services:
       timeout: 5s
       retries: 8
       start_period: 15s
+    networks:
+      - default
+      - code_runner_internal
+
+  code-runner:
+    build:
+      context: ${APP_SOURCE_DIR:-.}
+      dockerfile: deploy/code-runner/Dockerfile
+    image: ${STEMEGLE_IMAGE_PREFIX:-stemegle}-code-runner:latest
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=96m,mode=1777
+    expose:
+      - "8080"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 384m
+    cpus: 1.0
+    networks:
+      - code_runner_internal
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 4s
+      retries: 5
+      start_period: 10s
 
   backup:
     build:
@@ -244,3 +282,7 @@ services:
 volumes:
   postgres_data:
   postgres_backups:
+
+networks:
+  code_runner_internal:
+    internal: true

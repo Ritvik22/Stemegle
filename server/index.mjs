@@ -172,6 +172,8 @@ export function createBackendRuntime(options = {}) {
     getOnlineCount: () => realtime.getPresenceCount('stemegle:visitors'),
     notifyStats: () => realtime.publishDatabaseChange({ table: 'matches', event: 'INSERT' }),
     verifyMatchTicket: (ticket) => realtime.verifyMatchTicket(ticket),
+    verifyCodegleTicket: (ticket) => realtime.verifyCodegleTicket(ticket),
+    markCodegleSolved: (ticket) => realtime.markCodegleSolved(ticket),
   }));
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API route not found' });

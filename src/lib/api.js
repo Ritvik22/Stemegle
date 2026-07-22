@@ -105,3 +105,10 @@ export async function uploadQuestionPackImage(file) {
   }
   return data;
 }
+
+export function submitCodegleSolution({ matchId, playerId, ticket, language, source }) {
+  return request('/api/codegle/submit', {
+    method: 'POST',
+    body: JSON.stringify({ matchId, playerId, ticket, language, source }),
+  });
+}

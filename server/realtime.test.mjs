@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { test } from 'node:test';
 import WebSocket from 'ws';
 import { getQuestionsForMatch } from '../src/data/questions.js';
+import { getCodegleProblemForMatch } from '../src/data/codegleProblems.js';
 import { createRealtimeClient } from '../src/lib/realtime.js';
 import {
   attachRealtimeServer,
@@ -439,6 +440,69 @@ test('match topics bind participants, accounts, lifecycle, and host-only events'
     await host.close();
     await guest.close();
     await intruder.close();
+    await fixture.close();
+  }
+});
+
+test('Codegle uses isolated topics, host-controlled starts, and a server-decided first winner', async () => {
+  const fixture = await createFixture();
+  const host = await openPeer(fixture.url, { headers: { 'x-test-user': 'coder-a' } });
+  const guest = await openPeer(fixture.url, { headers: { 'x-test-user': 'coder-b' } });
+  const matchId = 'code-player-a--code-player-b';
+  const topic = `stemegle:codegle:match:${matchId}`;
+  try {
+    host.send(subscription('codegle-a', topic, 'code-player-a'));
+    guest.send(subscription('codegle-b', topic, 'code-player-b'));
+    await host.next((message) => message.type === 'subscribed');
+    await guest.next((message) => message.type === 'subscribed');
+    await trackPeer(host, 'codegle-a', { playerId: 'code-player-a', name: 'Ada', joinedAt: 1, mode: 'codegle' });
+    await trackPeer(guest, 'codegle-b', { playerId: 'code-player-b', name: 'Grace', joinedAt: 2, mode: 'codegle' });
+    const hostTicket = await host.next((message) => message.type === 'match_ticket');
+    const guestTicket = await guest.next((message) => message.type === 'match_ticket');
+    assert.equal(hostTicket.ranked, false);
+    assert.equal(guestTicket.ranked, false);
+
+    guest.send({
+      type: 'broadcast', ref: 'guest-codegle-start', channelId: 'codegle-b', event: 'start',
+      payload: { startsAt: Date.now() + 700, problemId: getCodegleProblemForMatch(matchId).id },
+    });
+    assert.equal((await guest.next((message) => message.ref === 'guest-codegle-start')).code, 'forbidden_sender');
+
+    guest.send({
+      type: 'broadcast', ref: 'fake-solved', channelId: 'codegle-b', event: 'solved',
+      payload: { playerId: 'code-player-b', elapsedMs: 1 },
+    });
+    assert.equal((await guest.next((message) => message.ref === 'fake-solved')).code, 'invalid_event');
+
+    const startsAt = Date.now() + 700;
+    const problemId = getCodegleProblemForMatch(matchId).id;
+    host.send({
+      type: 'broadcast', ref: 'host-codegle-start', channelId: 'codegle-a', event: 'start',
+      payload: { startsAt, problemId },
+    });
+    await host.next((message) => message.type === 'ack' && message.ref === 'host-codegle-start');
+    await guest.next((message) => message.type === 'broadcast' && message.event === 'start');
+    const authorization = fixture.realtime.verifyCodegleTicket({
+      ticket: guestTicket.ticket, matchId, playerId: 'code-player-b',
+    });
+    assert.equal(authorization.mode, 'codegle');
+    assert.equal(authorization.problemId, problemId);
+    assert.equal(authorization.winner, null);
+
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, startsAt - Date.now() + 10)));
+    const winner = fixture.realtime.markCodegleSolved({
+      ticket: guestTicket.ticket, matchId, playerId: 'code-player-b',
+    });
+    assert.equal(winner.playerId, 'code-player-b');
+    const hostSolved = await host.next((message) => message.type === 'broadcast' && message.event === 'solved');
+    assert.equal(hostSolved.payload.playerId, 'code-player-b');
+    const later = fixture.realtime.markCodegleSolved({
+      ticket: hostTicket.ticket, matchId, playerId: 'code-player-a',
+    });
+    assert.deepEqual(later, winner);
+  } finally {
+    await host.close();
+    await guest.close();
     await fixture.close();
   }
 });

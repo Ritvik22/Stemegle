@@ -10,6 +10,7 @@ STEMEGLE_IMAGE_PREFIX="${STEMEGLE_IMAGE_PREFIX:-stemegle}"
 APP_IMAGE="${STEMEGLE_IMAGE_PREFIX}:latest"
 BACKEND_IMAGE="${STEMEGLE_IMAGE_PREFIX}-backend:latest"
 BACKUP_IMAGE="${STEMEGLE_IMAGE_PREFIX}-postgres-tools:latest"
+RUNNER_IMAGE="${STEMEGLE_IMAGE_PREFIX}-code-runner:latest"
 
 mkdir -p "$(dirname "$DEPLOY_SOURCE_DIR")"
 git config --global --replace-all safe.directory "$DEPLOY_SOURCE_DIR"
@@ -45,10 +46,11 @@ running_image_id() {
 PREVIOUS_APP_IMAGE="$(running_image_id app)"
 PREVIOUS_BACKEND_IMAGE="$(running_image_id backend)"
 PREVIOUS_BACKUP_IMAGE="$(running_image_id backup)"
+PREVIOUS_RUNNER_IMAGE="$(running_image_id code-runner)"
 
 # The validation image runs unit tests, question-bank integrity checks, and a
 # production frontend build. A failed validation never reaches the database.
-docker compose build validate migrate backend backup app
+docker compose build validate migrate code-runner backend backup app
 
 # Bring up the database first, then take a fully restore-verified snapshot
 # before applying any new schema changes.
@@ -59,7 +61,7 @@ docker compose up --no-deps --abort-on-container-exit --exit-code-from migrate m
 # Remove services deleted from the current Compose model (including the former
 # analytics sidecar) only after the database backup and migrations succeed.
 DEPLOY_HEALTHY=0
-if docker compose up -d --no-build --wait --remove-orphans backend backup app; then
+if docker compose up -d --no-build --wait --remove-orphans code-runner backend backup app; then
   for attempt in {1..30}; do
     if curl -fsSI "http://app/" >/dev/null \
       && curl -fsS "http://app/api/stats" >/dev/null \
@@ -82,7 +84,12 @@ if [[ -n "$PREVIOUS_APP_IMAGE" && -n "$PREVIOUS_BACKEND_IMAGE" && -n "$PREVIOUS_
   docker image tag "$PREVIOUS_APP_IMAGE" "$APP_IMAGE"
   docker image tag "$PREVIOUS_BACKEND_IMAGE" "$BACKEND_IMAGE"
   docker image tag "$PREVIOUS_BACKUP_IMAGE" "$BACKUP_IMAGE"
-  if docker compose up -d --no-build --no-deps --force-recreate --wait backend backup app; then
+  ROLLBACK_SERVICES=(backend backup app)
+  if [[ -n "$PREVIOUS_RUNNER_IMAGE" ]]; then
+    docker image tag "$PREVIOUS_RUNNER_IMAGE" "$RUNNER_IMAGE"
+    ROLLBACK_SERVICES=(code-runner "${ROLLBACK_SERVICES[@]}")
+  fi
+  if docker compose up -d --no-build --no-deps --force-recreate --wait "${ROLLBACK_SERVICES[@]}"; then
     for attempt in {1..30}; do
       if curl -fsSI "http://app/" >/dev/null \
         && curl -fsS "http://app/api/stats" >/dev/null \
@@ -95,6 +102,6 @@ if [[ -n "$PREVIOUS_APP_IMAGE" && -n "$PREVIOUS_BACKEND_IMAGE" && -n "$PREVIOUS_
   fi
   echo "Automatic application rollback also failed" >&2
 else
-  echo "No complete previous self-hosted image set was available for automatic rollback" >&2
+  echo "No complete previous web, backend, and backup image set was available for automatic rollback" >&2
 fi
 exit 1

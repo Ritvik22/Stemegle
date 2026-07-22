@@ -2,7 +2,10 @@ import { fromNodeHeaders } from 'better-auth/node';
 import { Router, raw } from 'express';
 import { auth } from './auth.mjs';
 import { getAnalyticsDashboard, ingestAnalyticsRequest } from './analytics.mjs';
+import { executeCode } from './code-runner-client.mjs';
+import { codegleTests } from './codegle-tests.mjs';
 import { pool, withTransaction } from './db.mjs';
+import { CODEGLE_LANGUAGES, getCodegleProblem } from '../src/data/codegleProblems.js';
 
 const MAX_SCORE = 6000;
 const MAX_RANKED_MATCHES_PER_DAY = 100;
@@ -11,6 +14,8 @@ const MAX_PACK_QUESTIONS = 50;
 const MAX_PACK_IMAGES = 250;
 const MAX_PACK_IMAGE_BYTES = 1024 * 1024;
 const PACK_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const CODEGLE_LANGUAGE_IDS = new Set(CODEGLE_LANGUAGES.map((language) => language.id));
+const MAX_CODEGLE_SOURCE_BYTES = 16 * 1024;
 const rateBuckets = new Map();
 
 function safeIp(req) {
@@ -174,6 +179,9 @@ export function createApiRouter({
   getOnlineCount = () => 0,
   notifyStats = () => {},
   verifyMatchTicket = () => false,
+  verifyCodegleTicket = () => false,
+  markCodegleSolved = () => false,
+  runCode = executeCode,
 } = {}) {
   const router = Router();
 
@@ -358,6 +366,85 @@ export function createApiRouter({
         score: resolvedScore,
         opponentScore: resolvedOpponentScore,
         stats: result.stats,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/codegle/submit', requireOrigin, async (req, res, next) => {
+    if (!allowRequest(req, 'codegle-submit', 30)) {
+      res.status(429).json({ error: 'Too many Codegle submissions. Pause briefly and try again.' });
+      return;
+    }
+    const matchId = req.body?.matchId;
+    const playerId = req.body?.playerId;
+    const ticket = req.body?.ticket;
+    const language = req.body?.language;
+    const source = req.body?.source;
+    if (!validMatchId(matchId)
+      || !validMatchParticipant(matchId, playerId)
+      || !validMatchTicket(ticket)
+      || !CODEGLE_LANGUAGE_IDS.has(language)
+      || typeof source !== 'string'
+      || !source.trim()
+      || Buffer.byteLength(source) > MAX_CODEGLE_SOURCE_BYTES) {
+      res.status(400).json({ error: 'Invalid Codegle submission' });
+      return;
+    }
+    const authorization = verifyCodegleTicket({ ticket, matchId, playerId });
+    if (!authorization) {
+      res.status(403).json({ error: 'This Codegle match is not authorized' });
+      return;
+    }
+    if (authorization.winner) {
+      try {
+        const inserted = await pool.query(
+          `insert into matches (id, mode) values ($1, 'codegle')
+           on conflict (id) do nothing returning id`,
+          [matchId],
+        );
+        if (inserted.rowCount) notifyStats();
+      } catch (error) {
+        next(error);
+        return;
+      }
+      if (authorization.winner.playerId === playerId) {
+        res.json({ passed: true, status: 'accepted', message: 'All tests passed.', winner: authorization.winner, recorded: true });
+        return;
+      }
+      res.status(409).json({ error: 'This Codegle match already has a winner', winner: authorization.winner });
+      return;
+    }
+    const problem = getCodegleProblem(authorization.problemId);
+    const tests = codegleTests(authorization.problemId);
+    if (!problem || !tests.length) {
+      res.status(409).json({ error: 'The Codegle problem is unavailable' });
+      return;
+    }
+    try {
+      const verdict = await runCode({ language, source, cases: tests });
+      if (verdict.status !== 'accepted') {
+        res.json({ passed: false, status: verdict.status, message: verdict.message || 'Try again.' });
+        return;
+      }
+      const winner = markCodegleSolved({ ticket, matchId, playerId });
+      if (!winner) {
+        res.status(409).json({ error: 'The match could not accept this solution' });
+        return;
+      }
+      const inserted = await pool.query(
+        `insert into matches (id, mode) values ($1, 'codegle')
+         on conflict (id) do nothing returning id`,
+        [matchId],
+      );
+      if (inserted.rowCount) notifyStats();
+      res.json({
+        passed: true,
+        status: 'accepted',
+        message: verdict.message || 'All tests passed.',
+        winner,
+        recorded: Boolean(inserted.rowCount),
       });
     } catch (error) {
       next(error);
