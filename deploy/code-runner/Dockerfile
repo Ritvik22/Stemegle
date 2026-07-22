@@ -1,19 +1,13 @@
-FROM debian:bookworm-slim AS sandbox-build
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends gcc libseccomp-dev \
-  && rm -rf /var/lib/apt/lists/*
-COPY code-runner/sandbox.c /tmp/sandbox.c
-RUN gcc -O2 -Wall -Wextra /tmp/sandbox.c -lseccomp -o /tmp/codegle-sandbox
-
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 g++ default-jdk-headless libseccomp2 \
+  && apt-get install -y --no-install-recommends python3 g++ default-jdk-headless libseccomp-dev \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /runner
-COPY --from=sandbox-build /tmp/codegle-sandbox /usr/local/bin/codegle-sandbox
+COPY code-runner/sandbox.c /tmp/sandbox.c
+RUN gcc -O2 -Wall -Wextra /tmp/sandbox.c -lseccomp -o /usr/local/bin/codegle-sandbox \
+  && rm /tmp/sandbox.c
 COPY --chown=root:root code-runner/runner.mjs ./runner.mjs
 
 ENV NODE_ENV=production
