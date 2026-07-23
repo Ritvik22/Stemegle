@@ -449,7 +449,8 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
   const host = await openPeer(fixture.url, { headers: { 'x-test-user': 'coder-a' } });
   const guest = await openPeer(fixture.url, { headers: { 'x-test-user': 'coder-b' } });
   const matchId = 'code-player-a--code-player-b';
-  const topic = `stemegle:codegle:match:${matchId}`;
+  const difficulty = 'intermediate';
+  const topic = `stemegle:codegle:match:${difficulty}:${matchId}`;
   try {
     host.send(subscription('codegle-a', topic, 'code-player-a'));
     guest.send(subscription('codegle-b', topic, 'code-player-b'));
@@ -464,7 +465,7 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
 
     guest.send({
       type: 'broadcast', ref: 'guest-codegle-start', channelId: 'codegle-b', event: 'start',
-      payload: { startsAt: Date.now() + 700, problemId: getCodegleProblemForMatch(matchId).id },
+      payload: { startsAt: Date.now() + 700, problemId: getCodegleProblemForMatch(matchId, difficulty).id },
     });
     assert.equal((await guest.next((message) => message.ref === 'guest-codegle-start')).code, 'forbidden_sender');
 
@@ -475,7 +476,7 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
     assert.equal((await guest.next((message) => message.ref === 'fake-solved')).code, 'invalid_event');
 
     const startsAt = Date.now() + 700;
-    const problemId = getCodegleProblemForMatch(matchId).id;
+    const problemId = getCodegleProblemForMatch(matchId, difficulty).id;
     host.send({
       type: 'broadcast', ref: 'host-codegle-start', channelId: 'codegle-a', event: 'start',
       payload: { startsAt, problemId },
@@ -486,6 +487,7 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
       ticket: guestTicket.ticket, matchId, playerId: 'code-player-b',
     });
     assert.equal(authorization.mode, 'codegle');
+    assert.equal(authorization.difficulty, difficulty);
     assert.equal(authorization.problemId, problemId);
     assert.equal(authorization.winner, null);
 
@@ -503,6 +505,37 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
   } finally {
     await host.close();
     await guest.close();
+    await fixture.close();
+  }
+});
+
+test('Codegle difficulty topics reject mismatched lobby presence', async () => {
+  const fixture = await createFixture();
+  const peer = await openPeer(fixture.url);
+  try {
+    peer.send(subscription(
+      'beginner-lobby',
+      'stemegle:codegle:lobby:beginner:v1',
+      'difficulty-player',
+    ));
+    await peer.next((message) => message.type === 'subscribed');
+    peer.send({
+      type: 'presence.track',
+      ref: 'wrong-difficulty',
+      channelId: 'beginner-lobby',
+      state: {
+        playerId: 'difficulty-player',
+        name: 'Level Hopper',
+        joinedAt: Date.now(),
+        mode: 'codegle',
+        difficulty: 'advanced',
+        phase: 'waiting',
+      },
+    });
+    const rejection = await peer.next((message) => message.ref === 'wrong-difficulty');
+    assert.equal(rejection.code, 'invalid_presence');
+  } finally {
+    await peer.close();
     await fixture.close();
   }
 });

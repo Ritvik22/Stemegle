@@ -240,6 +240,8 @@ export class RealtimeChannel {
         matchId: message.matchId,
         playerId: message.playerId,
         ranked: message.ranked === true,
+        mode: typeof message.mode === 'string' ? message.mode : null,
+        difficulty: typeof message.difficulty === 'string' ? message.difficulty : null,
         expiresAt: Number(message.expiresAt) || 0,
       };
       return;

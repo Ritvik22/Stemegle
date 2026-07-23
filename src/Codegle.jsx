@@ -6,16 +6,20 @@ import { cpp } from '@codemirror/lang-cpp';
 import { javascript } from '@codemirror/lang-javascript';
 import { vscodeDark } from '@uiw/codemirror-theme-vscode';
 import {
-  ArrowLeft, ArrowRight, Braces, Check, Clock3, Code2, Cpu, FlaskConical,
-  LoaderCircle, Play, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
+  ArrowLeft, ArrowRight, Braces, Check, Clock3, Code2, Cpu, FlaskConical, Gauge,
+  LoaderCircle, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
 } from 'lucide-react';
 import { submitCodegleSolution } from './lib/api';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
-import { CODEGLE_LANGUAGES, getCodegleProblem, getCodegleProblemForMatch } from './data/codegleProblems';
+import {
+  CODEGLE_DIFFICULTIES, CODEGLE_LANGUAGES, getCodegleProblem, getCodegleProblemForMatch,
+} from './data/codegleProblems';
 import { trackAnalyticsEvent } from './lib/analytics';
 
-const CODEGLE_LOBBY = 'stemegle:codegle:lobby:v1';
+const CODEGLE_PRESENCE = 'stemegle:codegle:presence:v1';
 const CODEGLE_MATCH_PREFIX = 'stemegle:codegle:match:';
+const codegleLobby = (difficulty) => `stemegle:codegle:lobby:${difficulty}:v1`;
+const codegleMatchTopic = (difficulty, matchId) => `${CODEGLE_MATCH_PREFIX}${difficulty}:${matchId}`;
 
 function playerId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -25,7 +29,37 @@ const languageExtension = {
   python: python(), java: java(), cpp: cpp(), javascript: javascript(),
 };
 
+function difficultyLabel(difficulty) {
+  return CODEGLE_DIFFICULTIES.find(({ id }) => id === difficulty)?.label || 'Beginner';
+}
+
+function useCodeglePopulations() {
+  const [populations, setPopulations] = useState(() => Object.fromEntries(
+    CODEGLE_DIFFICULTIES.map(({ id }) => [id, 0]),
+  ));
+
+  useEffect(() => {
+    if (!hasRealtimeConfig) return undefined;
+    const observerId = `observer-${playerId()}`;
+    const channel = realtime.channel(CODEGLE_PRESENCE, {
+      config: { presence: { key: observerId } },
+    });
+    channel.on('presence', { event: 'sync' }, () => {
+      const next = Object.fromEntries(CODEGLE_DIFFICULTIES.map(({ id }) => [id, 0]));
+      getPresencePlayers(channel).forEach((presence) => {
+        if (Object.hasOwn(next, presence.difficulty)) next[presence.difficulty] += 1;
+      });
+      setPopulations(next);
+    }).subscribe();
+    return () => realtime.removeChannel(channel);
+  }, []);
+
+  return populations;
+}
+
 export function CodegleIntro({ onBack, onPlay }) {
+  const [difficulty, setDifficulty] = useState('beginner');
+  const populations = useCodeglePopulations();
   return (
     <main className="codegle-intro">
       <button className="codegle-back" onClick={onBack}><ArrowLeft size={17} /> Back to Stemegle</button>
@@ -35,7 +69,23 @@ export function CodegleIntro({ onBack, onPlay }) {
           <p className="eyebrow">LIVE COMPETITIVE CODING</p>
           <h1>Meet <span>Codegle.</span></h1>
           <p>Get one coding problem, write a real program, and race a live opponent through hidden tests. Wrong answer? Fix it and submit again. First accepted solution wins.</p>
-          <button className="button button-large codegle-primary" onClick={onPlay}><Code2 /> Find a coding rival <ArrowRight /></button>
+          <fieldset className="codegle-difficulties">
+            <legend>Choose your difficulty</legend>
+            {CODEGLE_DIFFICULTIES.map((option) => (
+              <button
+                type="button"
+                key={option.id}
+                className={difficulty === option.id ? `selected ${option.id}` : option.id}
+                onClick={() => setDifficulty(option.id)}
+                aria-pressed={difficulty === option.id}
+              >
+                <span><Gauge />{option.label}</span>
+                <small>{option.description}</small>
+                <b><i />{populations[option.id]} playing now</b>
+              </button>
+            ))}
+          </fieldset>
+          <button className="button button-large codegle-primary" onClick={() => onPlay(difficulty)}><Code2 /> Find a {difficultyLabel(difficulty).toLowerCase()} rival <ArrowRight /></button>
           <small>
             <span><Check /> Separate matchmaking pool</span>
             <span><Check /> Four real languages</span>
@@ -57,18 +107,20 @@ export function CodegleIntro({ onBack, onPlay }) {
   );
 }
 
-export function CodegleMatchmaking({ name, onMatched, onCancel }) {
+export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
   const [seconds, setSeconds] = useState(0);
+  const [population, setPopulation] = useState(0);
   const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'error');
   const [error, setError] = useState(hasRealtimeConfig ? '' : 'Realtime multiplayer is not configured.');
   const ownId = useRef(playerId());
 
   useEffect(() => {
-    trackAnalyticsEvent('queue_started', { mode: 'codegle' });
+    trackAnalyticsEvent('queue_started', { mode: 'codegle', difficulty });
     const ticker = setInterval(() => setSeconds((value) => value + 1), 1000);
     if (!hasRealtimeConfig) return () => clearInterval(ticker);
     let active = true;
     let lobby;
+    let census;
     let attempt;
     let joined = false;
 
@@ -84,7 +136,7 @@ export function CodegleMatchmaking({ name, onMatched, onCancel }) {
     const beginAttempt = (opponent) => {
       const matchId = [ownId.current, opponent.playerId].sort().join('--');
       const isHost = matchId.startsWith(ownId.current);
-      const channel = realtime.channel(`${CODEGLE_MATCH_PREFIX}${matchId}`, {
+      const channel = realtime.channel(codegleMatchTopic(difficulty, matchId), {
         config: { presence: { key: ownId.current }, broadcast: { self: true, ack: true } },
       });
       attempt = { channel, opponentId: opponent.playerId, intervals: [], timers: [] };
@@ -98,13 +150,18 @@ export function CodegleMatchmaking({ name, onMatched, onCancel }) {
         lobby.untrack();
         realtime.removeChannel(lobby);
         lobby = null;
+        void census.track({
+          playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'playing',
+        });
         onMatched({
           id: matchId,
           playerId: ownId.current,
           opponent: { id: opponent.playerId, name: opponent.name },
           problemId: payload.problemId,
+          difficulty,
           startsAt: payload.startsAt,
           channel,
+          populationChannel: census,
           getAuthorization: () => channel.matchAuthorization(),
         });
       };
@@ -119,12 +176,12 @@ export function CodegleMatchmaking({ name, onMatched, onCancel }) {
         })
         .subscribe(async (subscriptionStatus) => {
           if (subscriptionStatus === 'SUBSCRIBED' && attempt?.channel === channel) {
-            await channel.track({ playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle' });
+            await channel.track({ playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty });
             attempt.intervals.push(setInterval(() => {
               if (!active || joined) return;
               channel.send({ type: 'broadcast', event: 'ready', payload: { playerId: ownId.current } });
               if (isHost && opponentReady && channel.matchAuthorization()) {
-                const problem = getCodegleProblemForMatch(matchId);
+                const problem = getCodegleProblemForMatch(matchId, difficulty);
                 channel.send({ type: 'broadcast', event: 'start', payload: { startsAt: Date.now() + 1800, problemId: problem.id } });
               }
             }, 700));
@@ -151,11 +208,24 @@ export function CodegleMatchmaking({ name, onMatched, onCancel }) {
       beginAttempt(opponent);
     };
 
-    lobby = realtime.channel(CODEGLE_LOBBY, { config: { presence: { key: ownId.current } } });
+    census = realtime.channel(CODEGLE_PRESENCE, { config: { presence: { key: ownId.current } } });
+    census.on('presence', { event: 'sync' }, () => {
+      setPopulation(getPresencePlayers(census).filter((presence) => presence.difficulty === difficulty).length);
+    }).subscribe(async (subscriptionStatus) => {
+      if (subscriptionStatus === 'SUBSCRIBED') {
+        await census.track({
+          playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'waiting',
+        });
+      }
+    });
+
+    lobby = realtime.channel(codegleLobby(difficulty), { config: { presence: { key: ownId.current } } });
     lobby.on('presence', { event: 'sync' }, pair).subscribe(async (subscriptionStatus) => {
       if (subscriptionStatus === 'SUBSCRIBED') {
         setStatus('waiting');
-        await lobby.track({ playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle' });
+        await lobby.track({
+          playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'waiting',
+        });
       }
       if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
         setStatus('error');
@@ -167,17 +237,18 @@ export function CodegleMatchmaking({ name, onMatched, onCancel }) {
       clearInterval(ticker);
       if (lobby) { lobby.untrack(); realtime.removeChannel(lobby); }
       if (attempt && !joined) clearAttempt();
+      if (census && !joined) { census.untrack(); realtime.removeChannel(census); }
     };
-  }, [name, onMatched]);
+  }, [difficulty, name, onMatched]);
 
   return (
     <main className="codegle-queue">
       <div className="codegle-beta-badge"><Sparkles size={15} /> CODEGLE BETA</div>
       <div className="codegle-queue-orbit"><Code2 /><i /><i /><i /></div>
-      <p className="eyebrow">SEPARATE CODING QUEUE</p>
+      <p className="eyebrow">{difficultyLabel(difficulty).toUpperCase()} CODING QUEUE</p>
       <h1>{status === 'opponent-found' ? 'Coder found!' : status === 'error' ? 'Compiler lobby offline' : 'Finding a coding rival…'}</h1>
-      <p>{error || 'You’ll only match with another Codegle player. The normal STEM battle queue stays separate.'}</p>
-      <div className="codegle-queue-status"><span><Users /> {status === 'opponent-found' ? 'Opponent connected' : 'Codegle pool'}</span><span><Clock3 /> {seconds}s</span></div>
+      <p>{error || `You’ll only match with another ${difficultyLabel(difficulty).toLowerCase()} Codegle player.`}</p>
+      <div className="codegle-queue-status"><span><Users /> {status === 'opponent-found' ? 'Opponent connected' : `${population} playing this level`}</span><span><Clock3 /> {seconds}s</span></div>
       <button className="codegle-text-button" onClick={onCancel}><X /> Cancel search</button>
     </main>
   );
@@ -202,8 +273,9 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     setTimeout(() => onFinish({
       type: 'codegle', won, winnerName: won ? player : match.opponent.name,
       opponentName: match.opponent.name, elapsedMs: solved.elapsedMs,
+      difficulty: match.difficulty,
     }), 1100);
-  }, [match.opponent.name, match.playerId, onFinish, player]);
+  }, [match.difficulty, match.opponent.name, match.playerId, onFinish, player]);
 
   useEffect(() => {
     const channel = match.channel;
@@ -211,8 +283,12 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     return () => {
       channel.untrack();
       realtime.removeChannel(channel);
+      if (match.populationChannel) {
+        match.populationChannel.untrack();
+        realtime.removeChannel(match.populationChannel);
+      }
     };
-  }, [finish, match.channel]);
+  }, [finish, match.channel, match.populationChannel]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -225,13 +301,13 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
 
   useLayoutEffect(() => {
     const render = () => JSON.stringify({
-      mode: 'codegle-game', problem: problem.id, language, submitting,
+      mode: 'codegle-game', difficulty: match.difficulty, problem: problem.id, language, submitting,
       verdict: verdict?.status || null, elapsedMs: elapsed,
       player, opponent: match.opponent.name, winner: winner?.playerId || null,
     });
     window.render_game_to_text = render;
     return () => { if (window.render_game_to_text === render) delete window.render_game_to_text; };
-  }, [elapsed, language, match.opponent.name, player, problem.id, submitting, verdict, winner]);
+  }, [elapsed, language, match.difficulty, match.opponent.name, player, problem.id, submitting, verdict, winner]);
 
   async function submit() {
     if (submitting || countdown || winner) return;
@@ -267,7 +343,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
       </header>
       <div className="codegle-workspace">
         <aside className="codegle-problem">
-          <div className="codegle-problem-top"><span>{problem.difficulty}</span><small>ONE PROBLEM · FIRST ACCEPTED WINS</small></div>
+          <div className="codegle-problem-top"><span>{difficultyLabel(problem.difficulty)}</span><small>ONE PROBLEM · FIRST ACCEPTED WINS</small></div>
           <h1>{problem.title}</h1>
           <p>{problem.description}</p>
           <h2>Input</h2><p>{problem.inputFormat}</p>
@@ -308,7 +384,7 @@ export function CodegleResults({ result, onRematch, onHome }) {
   return (
     <main className="codegle-results">
       <div className={result.won ? 'codegle-result-icon won' : 'codegle-result-icon'}>{result.won ? <Trophy /> : <Code2 />}</div>
-      <p className="eyebrow">CODEGLE BETA · MATCH COMPLETE</p>
+      <p className="eyebrow">CODEGLE BETA · {difficultyLabel(result.difficulty).toUpperCase()} · MATCH COMPLETE</p>
       <h1>{result.won ? 'You compiled the win.' : `${result.winnerName} solved it first.`}</h1>
       <p>{result.won ? 'All hidden tests passed before your opponent.' : 'Refactor, resubmit, and take the next race.'}</p>
       <div className="codegle-result-stat"><Clock3 /><span><small>WINNING TIME</small><strong>{(result.elapsedMs / 1000).toFixed(1)} seconds</strong></span></div>

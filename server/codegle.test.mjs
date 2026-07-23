@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  CODEGLE_DIFFICULTIES,
   CODEGLE_LANGUAGES,
   CODEGLE_PROBLEMS,
   getCodegleProblem,
@@ -9,8 +10,12 @@ import {
 import { codegleTests } from './codegle-tests.mjs';
 
 test('Codegle problems have complete public prompts, four starters, and private judge cases', () => {
-  assert.ok(CODEGLE_PROBLEMS.length >= 6);
+  assert.equal(CODEGLE_PROBLEMS.length, 18);
   assert.deepEqual(CODEGLE_LANGUAGES.map(({ id }) => id), ['python', 'java', 'cpp', 'javascript']);
+  assert.deepEqual(CODEGLE_DIFFICULTIES.map(({ id }) => id), ['beginner', 'intermediate', 'advanced']);
+  for (const { id } of CODEGLE_DIFFICULTIES) {
+    assert.equal(CODEGLE_PROBLEMS.filter((problem) => problem.difficulty === id).length, 6);
+  }
   for (const problem of CODEGLE_PROBLEMS) {
     assert.equal(getCodegleProblem(problem.id), problem);
     assert.ok(problem.title && problem.description && problem.inputFormat && problem.outputFormat);
@@ -27,6 +32,10 @@ test('Codegle problems have complete public prompts, four starters, and private 
 
 test('Codegle problem selection is deterministic for both opponents', () => {
   const matchId = 'player-a--player-b';
-  assert.equal(getCodegleProblemForMatch(matchId), getCodegleProblemForMatch(matchId));
-  assert.ok(CODEGLE_PROBLEMS.includes(getCodegleProblemForMatch(matchId)));
+  for (const { id } of CODEGLE_DIFFICULTIES) {
+    const problem = getCodegleProblemForMatch(matchId, id);
+    assert.equal(problem, getCodegleProblemForMatch(matchId, id));
+    assert.equal(problem.difficulty, id);
+    assert.ok(CODEGLE_PROBLEMS.includes(problem));
+  }
 });

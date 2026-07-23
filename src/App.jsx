@@ -2170,6 +2170,7 @@ export default function App() {
   const [opponent, setOpponent] = useState('');
   const [match, setMatch] = useState(null);
   const [result, setResult] = useState(null);
+  const [codegleDifficulty, setCodegleDifficulty] = useState('beginner');
   const [adminAccess, setAdminAccess] = useState(false);
   const [guestDestination, setGuestDestination] = useState('matchmaking');
   const [postAuthDestination, setPostAuthDestination] = useState('');
@@ -2311,11 +2312,12 @@ export default function App() {
       game_id: match?.id,
       attempt_id: `${match?.id}:${match?.playerId}`,
       mode: 'codegle',
+      difficulty: data.difficulty || codegleDifficulty,
       outcome: data.won ? 'win' : 'loss',
     });
     setResult(data);
     setScreen('codegle-results');
-  }, [match?.id, match?.playerId]);
+  }, [codegleDifficulty, match?.id, match?.playerId]);
 
   useEffect(() => {
     if (screen === 'game' || screen === 'party-game' || screen === 'codegle-game') return undefined;
@@ -2431,7 +2433,8 @@ export default function App() {
   function openCodegle() {
     setScreen('codegle-intro');
   }
-  function playCodegle() {
+  function playCodegle(difficulty = 'beginner') {
+    setCodegleDifficulty(difficulty);
     if (accountName) {
       start(accountName, 'codegle-matchmaking');
       return;
@@ -2519,7 +2522,7 @@ export default function App() {
   else if (screen === 'pack-room' && partyCode) content = <HostedPackRoom code={partyCode} pack={hostedPack} party={party} playerId={partyPlayerId.current} onLeave={() => { leaveParty(); home(); }} onBack={home} createTeamConfig={createPackTeamConfig} createTournamentConfig={createPackTournamentConfig} />;
   else if (screen === 'matchmaking') content = <Matchmaking name={player} onMatched={handleMatched} onPlayBot={handlePlayBot} onCancel={cancelMatchmaking} />;
   else if (screen === 'codegle-intro') content = <Suspense fallback={<main className="codegle-loading">Loading Codegle…</main>}><CodegleView view="intro" onBack={home} onPlay={playCodegle} /></Suspense>;
-  else if (screen === 'codegle-matchmaking') content = <Suspense fallback={<main className="codegle-loading">Joining the Codegle queue…</main>}><CodegleView view="matchmaking" name={player} onMatched={handleCodegleMatched} onCancel={home} /></Suspense>;
+  else if (screen === 'codegle-matchmaking') content = <Suspense fallback={<main className="codegle-loading">Joining the Codegle queue…</main>}><CodegleView view="matchmaking" name={player} difficulty={codegleDifficulty} onMatched={handleCodegleMatched} onCancel={home} /></Suspense>;
   else if (screen === 'codegle-game' && match) content = <Suspense fallback={<main className="codegle-loading">Preparing the editor…</main>}><CodegleView view="game" player={player} match={match} onFinish={handleCodegleFinish} onExit={home} /></Suspense>;
   else if (screen === 'codegle-results' && result) content = <Suspense fallback={<main className="codegle-loading">Loading results…</main>}><CodegleView view="results" result={result} onRematch={rematchCodegle} onHome={home} /></Suspense>;
   else if (screen === 'party') content = <PartyRoom partyCode={partyCode} party={party} playerId={partyPlayerId.current} onCreateParty={createParty} onJoinParty={joinParty} onLeaveParty={() => setConfirmLeave(true)} onCancel={home} />;

@@ -1,7 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { getQuestionsForMatch } from '../src/data/questions.js';
-import { getCodegleProblemForMatch } from '../src/data/codegleProblems.js';
+import {
+  CODEGLE_DIFFICULTIES,
+  CODEGLE_DIFFICULTY_IDS,
+  getCodegleProblemForMatch,
+} from '../src/data/codegleProblems.js';
 
 export const REALTIME_PATH = '/api/realtime';
 export const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -41,7 +45,11 @@ const WIRE_ID_PATTERN = /^[A-Za-z0-9._~:-]+$/;
 const PARTY_TOPIC_PATTERN = /^stemegle:party:[A-Z0-9]{5}$/;
 const MATCH_TOPIC_PREFIX = 'stemegle:match:';
 const CODEGLE_MATCH_TOPIC_PREFIX = 'stemegle:codegle:match:';
-const CODEGLE_LOBBY_TOPIC = 'stemegle:codegle:lobby:v1';
+const CODEGLE_PRESENCE_TOPIC = 'stemegle:codegle:presence:v1';
+const CODEGLE_LOBBY_PREFIX = 'stemegle:codegle:lobby:';
+const CODEGLE_LOBBY_TOPICS = new Set(CODEGLE_DIFFICULTIES.map(
+  ({ id }) => `${CODEGLE_LOBBY_PREFIX}${id}:v1`,
+));
 const PARTY_TOPIC_PREFIX = 'stemegle:party:';
 
 function jsonBytes(value) {
@@ -58,11 +66,19 @@ function matchParticipants(topic) {
 
 function matchTopicDetails(topic) {
   if (typeof topic !== 'string') return null;
-  const prefix = topic.startsWith(CODEGLE_MATCH_TOPIC_PREFIX)
-    ? CODEGLE_MATCH_TOPIC_PREFIX
+  const codegle = topic.startsWith(CODEGLE_MATCH_TOPIC_PREFIX);
+  const prefix = codegle ? CODEGLE_MATCH_TOPIC_PREFIX
     : topic.startsWith(MATCH_TOPIC_PREFIX) ? MATCH_TOPIC_PREFIX : null;
   if (!prefix) return null;
-  const matchId = topic.slice(prefix.length);
+  let matchId = topic.slice(prefix.length);
+  let difficulty = null;
+  if (codegle) {
+    const separator = matchId.indexOf(':');
+    if (separator <= 0) return null;
+    difficulty = matchId.slice(0, separator);
+    matchId = matchId.slice(separator + 1);
+    if (!CODEGLE_DIFFICULTY_IDS.has(difficulty)) return null;
+  }
   const separator = matchId.indexOf('--');
   if (separator <= 0 || separator !== matchId.lastIndexOf('--')) return null;
   const players = [matchId.slice(0, separator), matchId.slice(separator + 2)];
@@ -74,8 +90,14 @@ function matchTopicDetails(topic) {
   return {
     participants: players,
     matchId,
-    mode: prefix === CODEGLE_MATCH_TOPIC_PREFIX ? 'codegle' : 'human',
+    mode: codegle ? 'codegle' : 'human',
+    difficulty,
   };
+}
+
+function codegleLobbyDifficulty(topic) {
+  if (!CODEGLE_LOBBY_TOPICS.has(topic)) return null;
+  return topic.slice(CODEGLE_LOBBY_PREFIX.length, -3);
 }
 
 function normalizedOrigin(value) {
@@ -112,7 +134,8 @@ export function isAllowedRealtimeTopic(topic) {
   return topic === 'stemegle:visitors'
     || topic === 'stemegle:ranked-stats'
     || topic === 'stemegle:lobby:v1'
-    || topic === CODEGLE_LOBBY_TOPIC
+    || topic === CODEGLE_PRESENCE_TOPIC
+    || CODEGLE_LOBBY_TOPICS.has(topic)
     || Boolean(matchParticipants(topic))
     || PARTY_TOPIC_PATTERN.test(topic);
 }
@@ -144,6 +167,20 @@ function validatePresence(topic, presenceKey, presence) {
     return 'Presence name must be between 1 and 64 characters.';
   }
   if (!Number.isFinite(presence.joinedAt)) return 'Presence joinedAt must be a number.';
+
+  if (topic === CODEGLE_PRESENCE_TOPIC) {
+    if (presence.mode !== 'codegle' || !CODEGLE_DIFFICULTY_IDS.has(presence.difficulty)) {
+      return 'Codegle presence requires a valid difficulty.';
+    }
+    if (!['waiting', 'playing'].includes(presence.phase)) return 'Codegle presence requires a valid phase.';
+  }
+
+  const lobbyDifficulty = codegleLobbyDifficulty(topic);
+  if (lobbyDifficulty && (presence.mode !== 'codegle'
+    || presence.difficulty !== lobbyDifficulty
+    || presence.phase !== 'waiting')) {
+    return 'Codegle lobby presence must match its difficulty.';
+  }
 
   if (topic.startsWith('stemegle:party:')) {
     if (typeof presence.partyLeader !== 'boolean') return 'Party presence requires partyLeader.';
@@ -273,7 +310,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
   function issueMatchTickets(topic) {
     const details = matchTopicDetails(topic);
     if (!details) return;
-    const { participants, matchId, mode } = details;
+    const { participants, matchId, mode, difficulty } = details;
     const tracked = [...(topics.get(topic) ?? [])].filter((member) => member.presence);
     const participantStates = participants.map(
       (playerId) => tracked.find((member) => member.presenceKey === playerId),
@@ -299,6 +336,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
         userId: ranked ? member.userId : null,
         ranked,
         mode,
+        difficulty,
         expiresAt: Date.now() + matchTicketTtlMs,
       };
       member.matchTicket = ticket;
@@ -309,6 +347,8 @@ export function attachRealtimeServer(httpServer, options = {}) {
         matchId: authorization.matchId,
         playerId: authorization.playerId,
         ranked: authorization.ranked,
+        mode: authorization.mode,
+        difficulty: authorization.difficulty,
         expiresAt: authorization.expiresAt,
       });
     }
@@ -471,7 +511,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
       const details = matchTopicDetails(state.topic);
       if (details.mode === 'codegle') {
         if (event === 'start') {
-          const expectedProblem = getCodegleProblemForMatch(details.matchId);
+          const expectedProblem = getCodegleProblemForMatch(details.matchId, details.difficulty);
           if (state.presenceKey !== participants[0]) return 'Only the match host can start the game.';
           if (!Number.isFinite(payload.startsAt)
             || payload.startsAt < Date.now() + 400
@@ -602,6 +642,8 @@ export function attachRealtimeServer(httpServer, options = {}) {
         const activeMembers = [...(topics.get(state.topic) ?? [])].filter((member) => member.presence);
         const baseRun = {
           mode: details.mode,
+          difficulty: details.difficulty,
+          topic: state.topic,
           participants,
           participantUsers: new Map(participants.map((participant) => [
             participant,
@@ -884,6 +926,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
     return {
       ...authorization,
       problemId: run.problemId,
+      difficulty: run.difficulty,
       startsAt: run.startsAt,
       winner: run.winner ? { ...run.winner } : null,
     };
@@ -901,9 +944,9 @@ export function attachRealtimeServer(httpServer, options = {}) {
         solvedAt,
         elapsedMs: solvedAt - run.startsAt,
       };
-      broadcastTopic(`${CODEGLE_MATCH_TOPIC_PREFIX}${matchId}`, {
+      broadcastTopic(run.topic, {
         type: 'broadcast',
-        topic: `${CODEGLE_MATCH_TOPIC_PREFIX}${matchId}`,
+        topic: run.topic,
         event: 'solved',
         payload: { ...run.winner },
       });
