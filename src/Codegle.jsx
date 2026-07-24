@@ -72,7 +72,10 @@ export function CodegleIntro({ onBack, onPlay }) {
           <h1>Meet <span>Codegle.</span></h1>
           <p>Get one coding problem, write a real program, and race a live opponent through hidden tests. Wrong answer? Fix it and submit again. First accepted solution wins.</p>
           <fieldset className="codegle-difficulties">
-            <legend>Choose your difficulty</legend>
+            <legend className="codegle-live-heading">
+              <Users />
+              <div><strong>Codegle Live Matchups</strong><small>Choose your difficulty</small></div>
+            </legend>
             {CODEGLE_DIFFICULTIES.map((option) => (
               <button
                 type="button"
@@ -88,7 +91,7 @@ export function CodegleIntro({ onBack, onPlay }) {
             ))}
           </fieldset>
           <div className="codegle-play-options">
-            <button className="button button-large codegle-primary" onClick={() => onPlay(difficulty, 'live')}><Users /> Codegle Live Matchups <ArrowRight /></button>
+            <button className="button button-large codegle-primary" onClick={() => onPlay(difficulty, 'live')}><Code2 /> Play {difficultyLabel(difficulty)} <ArrowRight /></button>
             <button className="button button-large codegle-solitaire" onClick={() => onPlay(difficulty, 'solitaire')}><Bot /> Codegle Solitaire <small>BOT</small></button>
           </div>
           <p className="codegle-match-note">Live Matchups searches for a person first, then starts a clearly labeled bot race after five seconds. Solitaire starts with a bot immediately.</p>
