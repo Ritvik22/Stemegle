@@ -6,10 +6,12 @@ import { cpp } from '@codemirror/lang-cpp';
 import { javascript } from '@codemirror/lang-javascript';
 import { vscodeDark } from '@uiw/codemirror-theme-vscode';
 import {
-  ArrowLeft, ArrowRight, Braces, Check, Clock3, Code2, Cpu, FlaskConical, Gauge,
+  ArrowLeft, ArrowRight, Bot, Braces, Check, Clock3, Code2, Cpu, FlaskConical, Gauge,
   LoaderCircle, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
 } from 'lucide-react';
-import { submitCodegleSolution } from './lib/api';
+import {
+  finishCodegleBotMatch, startCodegleBotMatch, submitCodegleSolution,
+} from './lib/api';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import {
   CODEGLE_DIFFICULTIES, CODEGLE_LANGUAGES, getCodegleProblem, getCodegleProblemForMatch,
@@ -81,11 +83,15 @@ export function CodegleIntro({ onBack, onPlay }) {
               >
                 <span><Gauge />{option.label}</span>
                 <small>{option.description}</small>
-                <b><i />{populations[option.id]} playing now</b>
+                <b><i />{populations[option.id]} real {populations[option.id] === 1 ? 'player' : 'players'} now</b>
               </button>
             ))}
           </fieldset>
-          <button className="button button-large codegle-primary" onClick={() => onPlay(difficulty)}><Code2 /> Find a {difficultyLabel(difficulty).toLowerCase()} rival <ArrowRight /></button>
+          <div className="codegle-play-options">
+            <button className="button button-large codegle-primary" onClick={() => onPlay(difficulty, 'live')}><Users /> Codegle Live Matchups <ArrowRight /></button>
+            <button className="button button-large codegle-solitaire" onClick={() => onPlay(difficulty, 'solitaire')}><Bot /> Codegle Solitaire <small>BOT</small></button>
+          </div>
+          <p className="codegle-match-note">Live Matchups searches for a person first, then starts a clearly labeled bot race after five seconds. Solitaire starts with a bot immediately.</p>
           <small>
             <span><Check /> Separate matchmaking pool</span>
             <span><Check /> Four real languages</span>
@@ -107,7 +113,7 @@ export function CodegleIntro({ onBack, onPlay }) {
   );
 }
 
-export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
+export function CodegleMatchmaking({ name, difficulty, mode = 'live', onMatched, onCancel }) {
   const [seconds, setSeconds] = useState(0);
   const [population, setPopulation] = useState(0);
   const [status, setStatus] = useState(hasRealtimeConfig ? 'connecting' : 'error');
@@ -115,7 +121,7 @@ export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
   const ownId = useRef(playerId());
 
   useEffect(() => {
-    trackAnalyticsEvent('queue_started', { mode: 'codegle', difficulty });
+    trackAnalyticsEvent('queue_started', { mode: mode === 'solitaire' ? 'codegle_solitaire' : 'codegle', difficulty });
     const ticker = setInterval(() => setSeconds((value) => value + 1), 1000);
     if (!hasRealtimeConfig) return () => clearInterval(ticker);
     let active = true;
@@ -123,6 +129,8 @@ export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
     let census;
     let attempt;
     let joined = false;
+    let botStarting = false;
+    let fallbackTimer;
 
     const clearAttempt = () => {
       if (!attempt) return;
@@ -131,6 +139,51 @@ export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
       attempt.channel.untrack();
       realtime.removeChannel(attempt.channel);
       attempt = null;
+    };
+
+    const beginBotMatch = async (kind) => {
+      if (!active || joined || botStarting) return;
+      botStarting = true;
+      clearAttempt();
+      clearTimeout(fallbackTimer);
+      setStatus('bot-found');
+      try {
+        if (lobby) {
+          await lobby.untrack();
+          realtime.removeChannel(lobby);
+          lobby = null;
+        }
+        const botMatch = await startCodegleBotMatch(ownId.current, difficulty, kind);
+        if (!active || !botMatch) return;
+        joined = true;
+        await census.track({
+          playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'playing',
+        });
+        const channel = { on() { return this; }, untrack() {}, unsubscribe() {} };
+        onMatched({
+          id: botMatch.matchId,
+          playerId: botMatch.playerId,
+          opponent: { id: botMatch.botId, name: botMatch.botName },
+          problemId: botMatch.problemId,
+          difficulty,
+          startsAt: botMatch.startsAt,
+          botSolvesAt: botMatch.botSolvesAt,
+          botKind: botMatch.botKind,
+          isBot: true,
+          channel,
+          populationChannel: census,
+          getAuthorization: () => ({
+            ticket: botMatch.ticket,
+            matchId: botMatch.matchId,
+            playerId: botMatch.playerId,
+            difficulty,
+          }),
+        });
+      } catch (botError) {
+        botStarting = false;
+        setStatus('error');
+        setError(botError.message || 'Could not prepare the Codegle bot.');
+      }
     };
 
     const beginAttempt = (opponent) => {
@@ -147,6 +200,7 @@ export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
         joined = true;
         attempt.intervals.forEach(clearInterval);
         attempt.timers.forEach(clearTimeout);
+        clearTimeout(fallbackTimer);
         lobby.untrack();
         realtime.removeChannel(lobby);
         lobby = null;
@@ -197,7 +251,7 @@ export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
     };
 
     const pair = () => {
-      if (!active || joined || !lobby) return;
+      if (!active || joined || botStarting || !lobby) return;
       const players = getPresencePlayers(lobby).sort((a, b) => a.joinedAt - b.joinedAt || a.playerId.localeCompare(b.playerId));
       const index = players.findIndex((candidate) => candidate.playerId === ownId.current);
       if (index < 0) return;
@@ -216,39 +270,46 @@ export function CodegleMatchmaking({ name, difficulty, onMatched, onCancel }) {
         await census.track({
           playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'waiting',
         });
+        if (mode === 'solitaire') void beginBotMatch('solitaire');
       }
     });
 
-    lobby = realtime.channel(codegleLobby(difficulty), { config: { presence: { key: ownId.current } } });
-    lobby.on('presence', { event: 'sync' }, pair).subscribe(async (subscriptionStatus) => {
-      if (subscriptionStatus === 'SUBSCRIBED') {
-        setStatus('waiting');
-        await lobby.track({
-          playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'waiting',
-        });
-      }
-      if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
-        setStatus('error');
-        setError('Unable to reach the Codegle lobby.');
-      }
-    });
+    if (mode === 'live') {
+      lobby = realtime.channel(codegleLobby(difficulty), { config: { presence: { key: ownId.current } } });
+      lobby.on('presence', { event: 'sync' }, pair).subscribe(async (subscriptionStatus) => {
+        if (subscriptionStatus === 'SUBSCRIBED') {
+          setStatus('waiting');
+          await lobby.track({
+            playerId: ownId.current, name, joinedAt: Date.now(), mode: 'codegle', difficulty, phase: 'waiting',
+          });
+          fallbackTimer = setTimeout(() => {
+            if (!attempt && !joined) void beginBotMatch('fallback');
+          }, 5000);
+        }
+        if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
+          setStatus('error');
+          setError('Unable to reach the Codegle lobby.');
+        }
+      });
+    }
     return () => {
       active = false;
       clearInterval(ticker);
+      clearTimeout(fallbackTimer);
       if (lobby) { lobby.untrack(); realtime.removeChannel(lobby); }
       if (attempt && !joined) clearAttempt();
       if (census && !joined) { census.untrack(); realtime.removeChannel(census); }
     };
-  }, [difficulty, name, onMatched]);
+  }, [difficulty, mode, name, onMatched]);
 
   return (
     <main className="codegle-queue">
       <div className="codegle-beta-badge"><Sparkles size={15} /> CODEGLE BETA</div>
       <div className="codegle-queue-orbit"><Code2 /><i /><i /><i /></div>
-      <p className="eyebrow">{difficultyLabel(difficulty).toUpperCase()} CODING QUEUE</p>
-      <h1>{status === 'opponent-found' ? 'Coder found!' : status === 'error' ? 'Compiler lobby offline' : 'Finding a coding rival…'}</h1>
-      <p>{error || `You’ll only match with another ${difficultyLabel(difficulty).toLowerCase()} Codegle player.`}</p>
-      <div className="codegle-queue-status"><span><Users /> {status === 'opponent-found' ? 'Opponent connected' : `${population} playing this level`}</span><span><Clock3 /> {seconds}s</span></div>
+      <p className="eyebrow">{mode === 'solitaire' ? 'CODEGLE SOLITAIRE · BOT' : `${difficultyLabel(difficulty).toUpperCase()} LIVE MATCHUPS`}</p>
+      <h1>{status === 'opponent-found' ? 'Coder found!' : status === 'bot-found' ? 'Bot challenger ready!' : status === 'error' ? 'Compiler lobby offline' : mode === 'solitaire' ? 'Preparing your bot race…' : 'Finding a coding rival…'}</h1>
+      <p>{error || (mode === 'solitaire' ? 'Your opponent is a clearly labeled Codegle bot.' : `Searching for a real ${difficultyLabel(difficulty).toLowerCase()} player. If nobody joins within five seconds, a clearly labeled bot will step in.`)}</p>
+      <div className="codegle-queue-status"><span>{status === 'bot-found' || mode === 'solitaire' ? <Bot /> : <Users />} {status === 'opponent-found' ? 'Human opponent connected' : status === 'bot-found' ? 'Bot opponent' : `${population} real ${population === 1 ? 'player' : 'players'} this level`}</span><span><Clock3 /> {seconds}s</span></div>
       <button className="codegle-text-button" onClick={onCancel}><X /> Cancel search</button>
     </main>
   );
@@ -273,14 +334,29 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     setTimeout(() => onFinish({
       type: 'codegle', won, winnerName: won ? player : match.opponent.name,
       opponentName: match.opponent.name, elapsedMs: solved.elapsedMs,
-      difficulty: match.difficulty,
+      difficulty: match.difficulty, vsBot: Boolean(match.isBot), botKind: match.botKind || null,
     }), 1100);
-  }, [match.difficulty, match.opponent.name, match.playerId, onFinish, player]);
+  }, [match.botKind, match.difficulty, match.isBot, match.opponent.name, match.playerId, onFinish, player]);
 
   useEffect(() => {
     const channel = match.channel;
-    channel.on('broadcast', { event: 'solved' }, ({ payload }) => finish(payload));
+    let botTimer;
+    if (match.isBot) {
+      const finishBot = async () => {
+        try {
+          const authorization = match.getAuthorization?.();
+          const result = await finishCodegleBotMatch(match.id, match.playerId, authorization?.ticket);
+          if (result?.winner) finish(result.winner);
+        } catch (botError) {
+          setVerdict({ status: 'connection_error', message: botError.message || 'Could not confirm the bot result.' });
+        }
+      };
+      botTimer = setTimeout(finishBot, Math.max(0, match.botSolvesAt - Date.now()));
+    } else {
+      channel.on('broadcast', { event: 'solved' }, ({ payload }) => finish(payload));
+    }
     return () => {
+      clearTimeout(botTimer);
       channel.untrack();
       realtime.removeChannel(channel);
       if (match.populationChannel) {
@@ -288,7 +364,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
         realtime.removeChannel(match.populationChannel);
       }
     };
-  }, [finish, match.channel, match.populationChannel]);
+  }, [finish, match.botSolvesAt, match.channel, match.getAuthorization, match.id, match.isBot, match.playerId, match.populationChannel]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -303,11 +379,12 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     const render = () => JSON.stringify({
       mode: 'codegle-game', difficulty: match.difficulty, problem: problem.id, language, submitting,
       verdict: verdict?.status || null, elapsedMs: elapsed,
-      player, opponent: match.opponent.name, winner: winner?.playerId || null,
+      player, opponent: match.opponent.name, opponentType: match.isBot ? 'bot' : 'human',
+      botKind: match.botKind || null, winner: winner?.playerId || null,
     });
     window.render_game_to_text = render;
     return () => { if (window.render_game_to_text === render) delete window.render_game_to_text; };
-  }, [elapsed, language, match.difficulty, match.opponent.name, player, problem.id, submitting, verdict, winner]);
+  }, [elapsed, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, submitting, verdict, winner]);
 
   async function submit() {
     if (submitting || countdown || winner) return;
@@ -338,12 +415,12 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
       <header className="codegle-game-header">
         <button onClick={onExit} aria-label="Exit Codegle"><ArrowLeft /></button>
         <strong><Code2 /> codegle <small>BETA</small></strong>
-        <div><span>{player}</span><b>VS</b><span>{match.opponent.name}</span></div>
+        <div><span>{player}</span><b>VS</b><span>{match.opponent.name}{match.isBot && <small className="codegle-bot-label"><Bot /> BOT</small>}</span></div>
         <time><Clock3 /> {Math.floor(elapsed / 60000)}:{String(Math.floor(elapsed / 1000) % 60).padStart(2, '0')}</time>
       </header>
       <div className="codegle-workspace">
         <aside className="codegle-problem">
-          <div className="codegle-problem-top"><span>{difficultyLabel(problem.difficulty)}</span><small>ONE PROBLEM · FIRST ACCEPTED WINS</small></div>
+          <div className="codegle-problem-top"><span>{difficultyLabel(problem.difficulty)}</span><small>{match.isBot ? 'BOT RACE · FIRST ACCEPTED WINS' : 'ONE PROBLEM · FIRST ACCEPTED WINS'}</small></div>
           <h1>{problem.title}</h1>
           <p>{problem.description}</p>
           <h2>Input</h2><p>{problem.inputFormat}</p>
@@ -355,6 +432,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
         <section className="codegle-editor-pane">
           <div className="codegle-editor-toolbar">
             <span><i /> main.{CODEGLE_LANGUAGES.find(({ id }) => id === language).extension}</span>
+            {match.isBot && <span className="codegle-bot-thinking"><Bot /> {match.opponent.name} is solving</span>}
             <label>Language<select value={language} onChange={(event) => setLanguage(event.target.value)}>{CODEGLE_LANGUAGES.map(({ id, label }) => <option value={id} key={id}>{label}</option>)}</select></label>
           </div>
           <CodeMirror
@@ -374,7 +452,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
           </footer>
         </section>
       </div>
-      {countdown > 0 && <div className="codegle-countdown"><Code2 /><small>CODERS READY</small><strong>{countdown}</strong></div>}
+      {countdown > 0 && <div className="codegle-countdown">{match.isBot ? <Bot /> : <Code2 />}<small>{match.isBot ? `${match.botKind === 'solitaire' ? 'SOLITAIRE' : 'BOT FALLBACK'} · BOT OPPONENT` : 'CODERS READY'}</small><strong>{countdown}</strong></div>}
       {winner && <div className="codegle-winner-flash"><Trophy /><strong>{winner.playerId === match.playerId ? 'Accepted — you won!' : `${match.opponent.name} solved it first`}</strong></div>}
     </main>
   );
@@ -384,11 +462,11 @@ export function CodegleResults({ result, onRematch, onHome }) {
   return (
     <main className="codegle-results">
       <div className={result.won ? 'codegle-result-icon won' : 'codegle-result-icon'}>{result.won ? <Trophy /> : <Code2 />}</div>
-      <p className="eyebrow">CODEGLE BETA · {difficultyLabel(result.difficulty).toUpperCase()} · MATCH COMPLETE</p>
+      <p className="eyebrow">CODEGLE BETA · {difficultyLabel(result.difficulty).toUpperCase()} · {result.vsBot ? 'BOT MATCH' : 'MATCH COMPLETE'}</p>
       <h1>{result.won ? 'You compiled the win.' : `${result.winnerName} solved it first.`}</h1>
       <p>{result.won ? 'All hidden tests passed before your opponent.' : 'Refactor, resubmit, and take the next race.'}</p>
       <div className="codegle-result-stat"><Clock3 /><span><small>WINNING TIME</small><strong>{(result.elapsedMs / 1000).toFixed(1)} seconds</strong></span></div>
-      <small className="codegle-count-note"><Check /> Codegle matches count toward matches completed all time.</small>
+      <small className="codegle-count-note"><Check /> {result.vsBot ? 'This clearly labeled bot race counts' : 'Codegle matches count'} toward matches completed all time.</small>
       <div><button className="button codegle-primary" onClick={onRematch}><RotateCcw /> Race again</button><button className="button button-secondary" onClick={onHome}>Back to Stemegle <ArrowRight /></button></div>
     </main>
   );

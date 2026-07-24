@@ -28,6 +28,12 @@ const DEFAULT_MATCH_TICKET_TTL_MS = 45 * 60 * 1000;
 const DEFAULT_MINIMUM_MATCH_DURATION_MS = 3000;
 const DEFAULT_QUESTION_TRANSITION_MS = 500;
 const DEFAULT_SERVER_START_DELAY_MS = 500;
+const CODEGLE_BOT_KINDS = new Set(['solitaire', 'fallback']);
+const CODEGLE_BOT_NAMES = ['Nova (bot)', 'Byte (bot)', 'Turing (bot)', 'Orbit (bot)', 'Pixel (bot)'];
+const CODEGLE_BOT_BASE_MS = {
+  solitaire: { beginner: 60_000, intermediate: 90_000, advanced: 120_000 },
+  fallback: { beginner: 45_000, intermediate: 70_000, advanced: 95_000 },
+};
 const MATCH_EVENTS = new Set(['ready', 'start', 'answer', 'score', 'finish', 'chat']);
 const CODEGLE_MATCH_EVENTS = new Set(['ready', 'start', 'chat']);
 const PARTY_EVENTS = new Set([
@@ -241,6 +247,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
     minimumMatchDurationMs = DEFAULT_MINIMUM_MATCH_DURATION_MS,
     questionTransitionMs = DEFAULT_QUESTION_TRANSITION_MS,
     serverStartDelayMs = DEFAULT_SERVER_START_DELAY_MS,
+    codegleBotDurationMs = null,
     getSessionUserId = async () => null,
   } = options;
   const originAllowlist = allowedOrigins === undefined
@@ -923,11 +930,22 @@ export function attachRealtimeServer(httpServer, options = {}) {
     if (authorization.matchId !== matchId || authorization.playerId !== playerId) return null;
     const run = matchRuns.get(matchId);
     if (!run || run.mode !== 'codegle' || !run.problemId) return null;
+    if (!run.winner && run.botSolvesAt && Date.now() >= run.botSolvesAt) {
+      run.winner = {
+        playerId: run.botId,
+        solvedAt: run.botSolvesAt,
+        elapsedMs: run.botSolvesAt - run.startsAt,
+      };
+    }
     return {
       ...authorization,
       problemId: run.problemId,
       difficulty: run.difficulty,
       startsAt: run.startsAt,
+      botId: run.botId || null,
+      botName: run.botName || null,
+      botSolvesAt: run.botSolvesAt || null,
+      botKind: run.botKind || null,
       winner: run.winner ? { ...run.winner } : null,
     };
   }
@@ -936,6 +954,13 @@ export function attachRealtimeServer(httpServer, options = {}) {
     const authorization = verifyCodegleTicket({ ticket, matchId, playerId });
     if (!authorization) return authorization;
     const run = matchRuns.get(matchId);
+    if (!run.winner && run.botSolvesAt && Date.now() >= run.botSolvesAt) {
+      run.winner = {
+        playerId: run.botId,
+        solvedAt: run.botSolvesAt,
+        elapsedMs: run.botSolvesAt - run.startsAt,
+      };
+    }
     if (!run.winner) {
       const solvedAt = Date.now();
       if (solvedAt < run.startsAt) return null;
@@ -944,12 +969,97 @@ export function attachRealtimeServer(httpServer, options = {}) {
         solvedAt,
         elapsedMs: solvedAt - run.startsAt,
       };
-      broadcastTopic(run.topic, {
-        type: 'broadcast',
-        topic: run.topic,
-        event: 'solved',
-        payload: { ...run.winner },
-      });
+      if (run.topic) {
+        broadcastTopic(run.topic, {
+          type: 'broadcast',
+          topic: run.topic,
+          event: 'solved',
+          payload: { ...run.winner },
+        });
+      }
+    }
+    return { ...run.winner };
+  }
+
+  function createCodegleBotMatch({ playerId, difficulty, kind = 'fallback' }) {
+    if (!validIdentifier(playerId, MAX_PRESENCE_KEY_LENGTH, PRESENCE_KEY_PATTERN)
+      || !CODEGLE_DIFFICULTY_IDS.has(difficulty)
+      || !CODEGLE_BOT_KINDS.has(kind)) return null;
+
+    const botId = `codegle-bot-${randomBytes(8).toString('hex')}`;
+    const matchId = [playerId, botId].sort().join('--');
+    const startsAt = Date.now() + 1800;
+    const problem = getCodegleProblemForMatch(matchId, difficulty);
+    const botName = CODEGLE_BOT_NAMES[randomBytes(1)[0] % CODEGLE_BOT_NAMES.length];
+    const configuredDuration = typeof codegleBotDurationMs === 'function'
+      ? codegleBotDurationMs({ matchId, difficulty, kind })
+      : codegleBotDurationMs;
+    const baseDuration = CODEGLE_BOT_BASE_MS[kind][difficulty];
+    const jitter = randomBytes(1)[0] / 255 * 10_000 - 5_000;
+    const hasConfiguredDuration = Number.isFinite(configuredDuration);
+    const durationMs = Math.max(hasConfiguredDuration ? 100 : 5_000, hasConfiguredDuration
+      ? configuredDuration
+      : Math.round(baseDuration + jitter));
+    const botSolvesAt = startsAt + durationMs;
+    const expiresAt = Date.now() + matchTicketTtlMs;
+    const ticket = randomBytes(32).toString('base64url');
+    const participants = matchId.split('--');
+    const run = {
+      mode: 'codegle',
+      difficulty,
+      topic: null,
+      participants,
+      participantUsers: new Map(participants.map((participant) => [participant, null])),
+      startsAt,
+      finishes: new Map(),
+      expiresAt,
+      problemId: problem.id,
+      winner: null,
+      botId,
+      botName,
+      botSolvesAt,
+      botKind: kind,
+    };
+    const authorization = {
+      ticket,
+      matchId,
+      playerId,
+      userId: null,
+      ranked: false,
+      mode: 'codegle',
+      difficulty,
+      isBot: true,
+      botKind: kind,
+      expiresAt,
+    };
+    matchRuns.set(matchId, run);
+    matchTickets.set(ticket, authorization);
+    return {
+      matchId,
+      playerId,
+      ticket,
+      problemId: problem.id,
+      difficulty,
+      startsAt,
+      botId,
+      botName,
+      botSolvesAt,
+      botKind: kind,
+      expiresAt,
+    };
+  }
+
+  function markCodegleBotSolved({ ticket, matchId, playerId }) {
+    const authorization = verifyCodegleTicket({ ticket, matchId, playerId });
+    if (!authorization?.botId) return authorization || false;
+    const run = matchRuns.get(matchId);
+    if (!run.winner && Date.now() + 250 < run.botSolvesAt) return null;
+    if (!run.winner) {
+      run.winner = {
+        playerId: run.botId,
+        solvedAt: run.botSolvesAt,
+        elapsedMs: run.botSolvesAt - run.startsAt,
+      };
     }
     return { ...run.winner };
   }
@@ -976,6 +1086,8 @@ export function attachRealtimeServer(httpServer, options = {}) {
     verifyMatchTicket,
     verifyCodegleTicket,
     markCodegleSolved,
+    createCodegleBotMatch,
+    markCodegleBotSolved,
     getPresenceCount(topic) {
       return new Set(
         [...(topics.get(topic) ?? [])]

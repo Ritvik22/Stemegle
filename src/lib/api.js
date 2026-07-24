@@ -49,6 +49,21 @@ export async function recordBotMatch(matchId) {
   });
 }
 
+export async function startCodegleBotMatch(playerId, difficulty, kind) {
+  const result = await request('/api/codegle/bot/start', {
+    method: 'POST',
+    body: JSON.stringify({ playerId, difficulty, kind }),
+  });
+  return result?.match || null;
+}
+
+export async function finishCodegleBotMatch(matchId, playerId, ticket) {
+  return request('/api/codegle/bot/finish', {
+    method: 'POST',
+    body: JSON.stringify({ matchId, playerId, ticket }),
+  });
+}
+
 export async function recordMatchResult(matchId, playerId, ticket, score, opponentScore) {
   if (!matchId || !playerId || !ticket) return null;
   const result = await request('/api/matches/result', {

@@ -174,6 +174,8 @@ export function createBackendRuntime(options = {}) {
     verifyMatchTicket: (ticket) => realtime.verifyMatchTicket(ticket),
     verifyCodegleTicket: (ticket) => realtime.verifyCodegleTicket(ticket),
     markCodegleSolved: (ticket) => realtime.markCodegleSolved(ticket),
+    createCodegleBotMatch: (options) => realtime.createCodegleBotMatch(options),
+    markCodegleBotSolved: (ticket) => realtime.markCodegleBotSolved(ticket),
   }));
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API route not found' });

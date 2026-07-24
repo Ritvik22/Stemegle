@@ -5,7 +5,9 @@ import { getAnalyticsDashboard, ingestAnalyticsRequest } from './analytics.mjs';
 import { executeCode } from './code-runner-client.mjs';
 import { codegleTests } from './codegle-tests.mjs';
 import { pool, withTransaction } from './db.mjs';
-import { CODEGLE_LANGUAGES, getCodegleProblem } from '../src/data/codegleProblems.js';
+import {
+  CODEGLE_DIFFICULTY_IDS, CODEGLE_LANGUAGES, getCodegleProblem,
+} from '../src/data/codegleProblems.js';
 
 const MAX_SCORE = 6000;
 const MAX_RANKED_MATCHES_PER_DAY = 100;
@@ -181,6 +183,8 @@ export function createApiRouter({
   verifyMatchTicket = () => false,
   verifyCodegleTicket = () => false,
   markCodegleSolved = () => false,
+  createCodegleBotMatch = () => null,
+  markCodegleBotSolved = () => false,
   runCode = executeCode,
 } = {}) {
   const router = Router();
@@ -446,6 +450,63 @@ export function createApiRouter({
         winner,
         recorded: Boolean(inserted.rowCount),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/codegle/bot/start', requireOrigin, (req, res) => {
+    if (!allowRequest(req, 'codegle-bot-start', 20)) {
+      res.status(429).json({ error: 'Too many Codegle bot matches. Pause briefly and try again.' });
+      return;
+    }
+    const playerId = req.body?.playerId;
+    const difficulty = req.body?.difficulty;
+    const kind = req.body?.kind;
+    if (typeof playerId !== 'string'
+      || playerId.length < 8
+      || playerId.length > 200
+      || !/^[A-Za-z0-9._~-]+$/.test(playerId)
+      || !CODEGLE_DIFFICULTY_IDS.has(difficulty)
+      || !['solitaire', 'fallback'].includes(kind)) {
+      res.status(400).json({ error: 'Invalid Codegle bot match request' });
+      return;
+    }
+    const match = createCodegleBotMatch({ playerId, difficulty, kind });
+    if (!match) {
+      res.status(503).json({ error: 'Could not prepare the Codegle bot' });
+      return;
+    }
+    res.json({ match });
+  });
+
+  router.post('/codegle/bot/finish', requireOrigin, async (req, res, next) => {
+    if (!allowRequest(req, 'codegle-bot-finish', 30)) {
+      res.status(429).json({ error: 'Too many Codegle bot updates. Pause briefly and try again.' });
+      return;
+    }
+    const matchId = req.body?.matchId;
+    const playerId = req.body?.playerId;
+    const ticket = req.body?.ticket;
+    if (!validMatchId(matchId)
+      || !validMatchParticipant(matchId, playerId)
+      || !validMatchTicket(ticket)) {
+      res.status(400).json({ error: 'Invalid Codegle bot result' });
+      return;
+    }
+    const winner = markCodegleBotSolved({ ticket, matchId, playerId });
+    if (!winner) {
+      res.status(409).json({ error: 'The Codegle bot has not finished yet' });
+      return;
+    }
+    try {
+      const inserted = await pool.query(
+        `insert into matches (id, mode) values ($1, 'codegle')
+         on conflict (id) do nothing returning id`,
+        [matchId],
+      );
+      if (inserted.rowCount) notifyStats();
+      res.json({ winner, recorded: Boolean(inserted.rowCount) });
     } catch (error) {
       next(error);
     }

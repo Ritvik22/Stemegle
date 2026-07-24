@@ -540,6 +540,60 @@ test('Codegle difficulty topics reject mismatched lobby presence', async () => {
   }
 });
 
+test('Codegle bot races use server-issued problems, deadlines, and winners', async () => {
+  const fixture = await createFixture({ codegleBotDurationMs: 100 });
+  try {
+    const match = fixture.realtime.createCodegleBotMatch({
+      playerId: 'solo-code-player',
+      difficulty: 'advanced',
+      kind: 'solitaire',
+    });
+    assert.ok(match.ticket);
+    assert.equal(match.difficulty, 'advanced');
+    assert.equal(match.botKind, 'solitaire');
+    assert.match(match.botName, /\(bot\)$/);
+    assert.equal(getCodegleProblemForMatch(match.matchId, 'advanced').id, match.problemId);
+    assert.equal(
+      fixture.realtime.createCodegleBotMatch({
+        playerId: 'solo-code-player',
+        difficulty: 'imaginary',
+        kind: 'solitaire',
+      }),
+      null,
+    );
+
+    const pending = fixture.realtime.verifyCodegleTicket({
+      ticket: match.ticket,
+      matchId: match.matchId,
+      playerId: match.playerId,
+    });
+    assert.equal(pending.winner, null);
+    assert.equal(pending.botId, match.botId);
+
+    await new Promise((resolve) => setTimeout(
+      resolve,
+      Math.max(0, match.botSolvesAt - Date.now() + 20),
+    ));
+    const winner = fixture.realtime.markCodegleBotSolved({
+      ticket: match.ticket,
+      matchId: match.matchId,
+      playerId: match.playerId,
+    });
+    assert.equal(winner.playerId, match.botId);
+    assert.equal(winner.elapsedMs, 100);
+    assert.deepEqual(
+      fixture.realtime.markCodegleSolved({
+        ticket: match.ticket,
+        matchId: match.matchId,
+        playerId: match.playerId,
+      }),
+      winner,
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
 test('one account cannot manufacture a ranked match or duplicate a participant', async () => {
   const fixture = await createFixture();
   const first = await openPeer(fixture.url, { headers: { 'x-test-user': 'same-user' } });
