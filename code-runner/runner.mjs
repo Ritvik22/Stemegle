@@ -7,6 +7,7 @@ import { join } from 'node:path';
 const PORT = Number(process.env.PORT || 8080);
 const MAX_BODY_BYTES = 96 * 1024;
 const MAX_SOURCE_BYTES = 16 * 1024;
+const MAX_INPUT_BYTES = 8 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const COMPILE_TIMEOUT_MS = 6000;
 const RUN_TIMEOUT_MS = 2200;
@@ -72,10 +73,14 @@ function execute(command, args, { cwd, input = '', timeoutMs }) {
   });
 }
 
-async function judge({ language, source, cases }) {
+async function runSubmission({ language, source, cases, input }) {
   const config = LANGUAGE_CONFIG[language];
+  const customRun = typeof input === 'string' && cases === undefined;
+  const judgedRun = Array.isArray(cases);
   if (!config || typeof source !== 'string' || Buffer.byteLength(source) > MAX_SOURCE_BYTES
-    || !Array.isArray(cases) || cases.length < 1 || cases.length > MAX_CASES) {
+    || (!customRun && !judgedRun)
+    || (customRun && Buffer.byteLength(input) > MAX_INPUT_BYTES)
+    || (judgedRun && (cases.length < 1 || cases.length > MAX_CASES))) {
     return { status: 'invalid', message: 'Invalid submission.' };
   }
   const directory = await mkdtemp(join(tmpdir(), 'codegle-'));
@@ -91,6 +96,23 @@ async function judge({ language, source, cases }) {
       if (compiled.timedOut) return { status: 'compile_error', message: 'Compilation timed out.' };
       if (compiled.tooLarge) return { status: 'compile_error', message: 'Compiler output was too large.' };
       if (compiled.code !== 0) return { status: 'compile_error', message: normalizedOutput(compiled.stderr).slice(0, 4000) || 'Compilation failed.' };
+    }
+    if (customRun) {
+      const [command, ...args] = config.run;
+      const result = await execute(command, args, { cwd: directory, input, timeoutMs: RUN_TIMEOUT_MS });
+      if (result.timedOut) return { status: 'timeout', message: 'Time limit exceeded.' };
+      if (result.tooLarge) return { status: 'runtime_error', message: 'Program output was too large.' };
+      if (result.code !== 0) {
+        return {
+          status: 'runtime_error',
+          message: normalizedOutput(result.stderr).slice(0, 4000) || 'Program exited with an error.',
+        };
+      }
+      return {
+        status: 'completed',
+        message: 'Program finished.',
+        output: normalizedOutput(result.stdout),
+      };
     }
     for (const [index, testCase] of cases.entries()) {
       if (!testCase || typeof testCase.input !== 'string' || typeof testCase.expected !== 'string') {
@@ -139,7 +161,7 @@ const server = createServer(async (request, response) => {
       }
       chunks.push(chunk);
     }
-    const result = await judge(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const result = await runSubmission(JSON.parse(Buffer.concat(chunks).toString('utf8')));
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     response.end(JSON.stringify(result));
   } catch {

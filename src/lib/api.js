@@ -64,6 +64,17 @@ export async function finishCodegleBotMatch(matchId, playerId, ticket) {
   });
 }
 
+export async function runCodegleProgram({
+  matchId, playerId, ticket, language, source, input,
+}) {
+  return request('/api/codegle/run', {
+    method: 'POST',
+    body: JSON.stringify({
+      matchId, playerId, ticket, language, source, input,
+    }),
+  });
+}
+
 export async function recordMatchResult(matchId, playerId, ticket, score, opponentScore) {
   if (!matchId || !playerId || !ticket) return null;
   const result = await request('/api/matches/result', {

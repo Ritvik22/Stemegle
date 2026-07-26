@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeQuestionPackInput, validQuestionPackImage } from './api.mjs';
+import { normalizeCodegleRunInput, normalizeQuestionPackInput, validQuestionPackImage } from './api.mjs';
+
+test('Codegle test runs validate participant, language, source, and custom input limits', () => {
+  const valid = {
+    matchId: 'player-a123--player-b123',
+    playerId: 'player-a123',
+    ticket: 'a'.repeat(43),
+    language: 'python',
+    source: 'print(input())',
+    input: 'hello',
+  };
+  assert.deepEqual(normalizeCodegleRunInput(valid), valid);
+  assert.equal(normalizeCodegleRunInput({ ...valid, playerId: 'outsider123' }), null);
+  assert.equal(normalizeCodegleRunInput({ ...valid, language: 'shell' }), null);
+  assert.equal(normalizeCodegleRunInput({ ...valid, source: ' ' }), null);
+  assert.equal(normalizeCodegleRunInput({ ...valid, source: 'x'.repeat(16 * 1024 + 1) }), null);
+  assert.equal(normalizeCodegleRunInput({ ...valid, input: 'x'.repeat(8 * 1024 + 1) }), null);
+});
 
 test('question packs normalize valid author input', () => {
   const normalized = normalizeQuestionPackInput({

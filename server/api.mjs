@@ -18,6 +18,7 @@ const MAX_PACK_IMAGE_BYTES = 1024 * 1024;
 const PACK_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const CODEGLE_LANGUAGE_IDS = new Set(CODEGLE_LANGUAGES.map((language) => language.id));
 const MAX_CODEGLE_SOURCE_BYTES = 16 * 1024;
+const MAX_CODEGLE_INPUT_BYTES = 8 * 1024;
 const rateBuckets = new Map();
 
 function safeIp(req) {
@@ -110,6 +111,25 @@ function validMatchParticipant(matchId, playerId) {
 
 function validMatchTicket(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+export function normalizeCodegleRunInput(value) {
+  const matchId = value?.matchId;
+  const playerId = value?.playerId;
+  const ticket = value?.ticket;
+  const language = value?.language;
+  const source = value?.source;
+  const input = value?.input;
+  if (!validMatchId(matchId)
+    || !validMatchParticipant(matchId, playerId)
+    || !validMatchTicket(ticket)
+    || !CODEGLE_LANGUAGE_IDS.has(language)
+    || typeof source !== 'string'
+    || !source.trim()
+    || Buffer.byteLength(source) > MAX_CODEGLE_SOURCE_BYTES
+    || typeof input !== 'string'
+    || Buffer.byteLength(input) > MAX_CODEGLE_INPUT_BYTES) return null;
+  return { matchId, playerId, ticket, language, source, input };
 }
 
 function validUuid(value) {
@@ -449,6 +469,38 @@ export function createApiRouter({
         message: verdict.message || 'All tests passed.',
         winner,
         recorded: Boolean(inserted.rowCount),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/codegle/run', requireOrigin, async (req, res, next) => {
+    if (!allowRequest(req, 'codegle-run', 30)) {
+      res.status(429).json({ error: 'Too many test runs. Pause briefly and try again.' });
+      return;
+    }
+    const runInput = normalizeCodegleRunInput(req.body);
+    if (!runInput) {
+      res.status(400).json({ error: 'Invalid Codegle test run' });
+      return;
+    }
+    const { matchId, playerId, ticket, language, source, input } = runInput;
+    const authorization = verifyCodegleTicket({ ticket, matchId, playerId });
+    if (!authorization) {
+      res.status(403).json({ error: 'This Codegle match is not authorized' });
+      return;
+    }
+    if (authorization.winner) {
+      res.status(409).json({ error: 'This Codegle match already has a winner', winner: authorization.winner });
+      return;
+    }
+    try {
+      const result = await runCode({ language, source, input });
+      res.json({
+        status: result.status,
+        message: result.message || 'Program finished.',
+        output: typeof result.output === 'string' ? result.output.slice(0, 64 * 1024) : '',
       });
     } catch (error) {
       next(error);

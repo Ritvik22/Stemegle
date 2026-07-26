@@ -7,10 +7,10 @@ import { javascript } from '@codemirror/lang-javascript';
 import { vscodeDark } from '@uiw/codemirror-theme-vscode';
 import {
   ArrowLeft, ArrowRight, Bot, Braces, Check, Clock3, Code2, Cpu, FlaskConical, Gauge,
-  LoaderCircle, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
+  LoaderCircle, Play, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
 } from 'lucide-react';
 import {
-  finishCodegleBotMatch, startCodegleBotMatch, submitCodegleSolution,
+  finishCodegleBotMatch, runCodegleProgram, startCodegleBotMatch, submitCodegleSolution,
 } from './lib/api';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import {
@@ -323,6 +323,10 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
   const [language, setLanguage] = useState('python');
   const [sources, setSources] = useState(() => Object.fromEntries(CODEGLE_LANGUAGES.map(({ id }) => [id, problem.starter[id]])));
   const [submitting, setSubmitting] = useState(false);
+  const [testOpen, setTestOpen] = useState(false);
+  const [testInput, setTestInput] = useState(problem.examples[0].input);
+  const [testResult, setTestResult] = useState(null);
+  const [running, setRunning] = useState(false);
   const [verdict, setVerdict] = useState(null);
   const [winner, setWinner] = useState(null);
   const [countdown, setCountdown] = useState(Math.max(0, Math.ceil((match.startsAt - Date.now()) / 1000)));
@@ -384,10 +388,42 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
       verdict: verdict?.status || null, elapsedMs: elapsed,
       player, opponent: match.opponent.name, opponentType: match.isBot ? 'bot' : 'human',
       botKind: match.botKind || null, winner: winner?.playerId || null,
+      testConsole: {
+        open: testOpen, running, status: testResult?.status || null,
+        message: testResult?.message || null,
+        output: testResult?.output || null,
+      },
     });
     window.render_game_to_text = render;
     return () => { if (window.render_game_to_text === render) delete window.render_game_to_text; };
-  }, [elapsed, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, submitting, verdict, winner]);
+  }, [elapsed, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, running, submitting, testOpen, testResult, verdict, winner]);
+
+  async function runTest() {
+    if (running || submitting || countdown || winner) return;
+    const authorization = match.getAuthorization?.();
+    if (!authorization?.ticket) {
+      setTestResult({ status: 'connection_error', message: 'Match authorization is still connecting.', output: '' });
+      return;
+    }
+    setRunning(true);
+    setTestResult(null);
+    try {
+      const result = await runCodegleProgram({
+        matchId: match.id,
+        playerId: match.playerId,
+        ticket: authorization.ticket,
+        language,
+        source: sources[language],
+        input: testInput,
+      });
+      setTestResult(result);
+    } catch (error) {
+      if (error.details?.winner) finish(error.details.winner);
+      else setTestResult({ status: 'error', message: error.message || 'Test run failed.', output: '' });
+    } finally {
+      setRunning(false);
+    }
+  }
 
   async function submit() {
     if (submitting || countdown || winner) return;
@@ -432,11 +468,14 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
           <div className="codegle-example"><small>INPUT</small><code>{problem.examples[0].input}</code><small>OUTPUT</small><code>{problem.examples[0].output}</code></div>
           <h2>Constraints</h2>{problem.constraints.map((constraint) => <code className="codegle-constraint" key={constraint}>{constraint}</code>)}
         </aside>
-        <section className="codegle-editor-pane">
+        <section className={testOpen ? 'codegle-editor-pane test-open' : 'codegle-editor-pane'}>
           <div className="codegle-editor-toolbar">
             <span><i /> main.{CODEGLE_LANGUAGES.find(({ id }) => id === language).extension}</span>
             {match.isBot && <span className="codegle-bot-thinking"><Bot /> {match.opponent.name} is solving</span>}
-            <label>Language<select value={language} onChange={(event) => setLanguage(event.target.value)}>{CODEGLE_LANGUAGES.map(({ id, label }) => <option value={id} key={id}>{label}</option>)}</select></label>
+            <div className="codegle-editor-actions">
+              <button className={testOpen ? 'codegle-test-toggle active' : 'codegle-test-toggle'} onClick={() => setTestOpen((open) => !open)} aria-expanded={testOpen}><Play /> Test code</button>
+              <label>Language<select value={language} onChange={(event) => { setLanguage(event.target.value); setTestResult(null); }}>{CODEGLE_LANGUAGES.map(({ id, label }) => <option value={id} key={id}>{label}</option>)}</select></label>
+            </div>
           </div>
           <CodeMirror
             value={sources[language]}
@@ -444,14 +483,30 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
             minHeight="430px"
             theme={vscodeDark}
             extensions={[languageExtension[language]]}
-            onChange={(value) => setSources((current) => ({ ...current, [language]: value }))}
+            onChange={(value) => {
+              setSources((current) => ({ ...current, [language]: value }));
+              setTestResult(null);
+            }}
             basicSetup={{ lineNumbers: true, bracketMatching: true, closeBrackets: true, highlightActiveLine: true, highlightSelectionMatches: true, indentOnInput: true, foldGutter: true }}
             indentWithTab
             aria-label="Code editor"
           />
+          {testOpen && (
+            <section className="codegle-test-console">
+              <label>
+                <span>CUSTOM INPUT</span>
+                <textarea value={testInput} onChange={(event) => setTestInput(event.target.value)} maxLength={8192} spellCheck="false" aria-label="Custom program input" />
+              </label>
+              <div className="codegle-test-output" aria-live="polite">
+                <header><span>PROGRAM OUTPUT</span><button onClick={() => { setTestInput(problem.examples[0].input); setTestResult(null); }}><RotateCcw /> Use sample</button></header>
+                <pre className={testResult ? testResult.status : ''}>{running ? 'Running in the sandbox…' : testResult ? (testResult.status === 'completed' ? (testResult.output || '(no output)') : (testResult.message || 'Run failed.')) : 'Run your code to see its output here.'}</pre>
+              </div>
+              <button className="button codegle-run" onClick={runTest} disabled={running || submitting || countdown > 0 || Boolean(winner)}>{running ? <LoaderCircle className="upload-spin" /> : <Play />}{running ? 'Running…' : 'Run code'}</button>
+            </section>
+          )}
           <footer className={verdict ? `codegle-verdict ${verdict.status}` : 'codegle-verdict'}>
             <div>{verdict ? (verdict.status === 'accepted' ? <Check /> : <FlaskConical />) : <Terminal />}<span><strong>{verdict ? verdict.status.replaceAll('_', ' ').toUpperCase() : 'READY'}</strong><small>{verdict?.message || 'Your code runs against hidden tests when submitted.'}</small></span></div>
-            <button className="button codegle-submit" onClick={submit} disabled={submitting || countdown > 0 || Boolean(winner)}>{submitting ? <LoaderCircle className="upload-spin" /> : verdict && verdict.status !== 'accepted' ? <RotateCcw /> : <Send />}{submitting ? 'Running…' : verdict && verdict.status !== 'accepted' ? 'Try again' : 'Submit solution'}</button>
+            <button className="button codegle-submit" onClick={submit} disabled={submitting || running || countdown > 0 || Boolean(winner)}>{submitting ? <LoaderCircle className="upload-spin" /> : verdict && verdict.status !== 'accepted' ? <RotateCcw /> : <Send />}{submitting ? 'Running…' : verdict && verdict.status !== 'accepted' ? 'Try again' : 'Submit solution'}</button>
           </footer>
         </section>
       </div>
