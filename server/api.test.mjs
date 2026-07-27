@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeCodegleRunInput, normalizeQuestionPackInput, validQuestionPackImage } from './api.mjs';
+import {
+  normalizeCodegleRunInput,
+  normalizeProfileNameInput,
+  normalizeQuestionPackInput,
+  profileLoginEmail,
+  validQuestionPackImage,
+} from './api.mjs';
+
+test('profile names normalize safely and update synthetic login identities', () => {
+  assert.equal(normalizeProfileNameInput({ name: '  Proton   Pilot  ' }), 'Proton Pilot');
+  assert.equal(normalizeProfileNameInput({ name: 'A' }), null);
+  assert.equal(normalizeProfileNameInput({ name: `A${'b'.repeat(30)}` }), null);
+  assert.equal(normalizeProfileNameInput({ name: ' \u0000 ' }), null);
+
+  const first = profileLoginEmail('old-name.12345678@players.stemegle.com', 'Nova Spark');
+  assert.match(first, /^novaspark\.[a-f0-9]{8}@players\.stemegle\.com$/);
+  assert.equal(profileLoginEmail('admin@example.com', 'Nova Spark'), 'admin@example.com');
+});
 
 test('Codegle test runs validate participant, language, source, and custom input limits', () => {
   const valid = {

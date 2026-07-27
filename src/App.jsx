@@ -30,6 +30,7 @@ import {
   Orbit,
   Play,
   Rocket,
+  Settings,
   Shuffle,
   Sparkles,
   Swords,
@@ -47,7 +48,14 @@ import {
   trackPageView,
 } from './lib/analytics';
 import { battleNameToAccountEmail, loginIdentityToEmail } from './lib/accountIdentity';
-import { authClient, fetchAdminAccess, fetchStats, recordBotMatch, recordMatchResult } from './lib/api';
+import {
+  authClient,
+  fetchAdminAccess,
+  fetchStats,
+  recordBotMatch,
+  recordMatchResult,
+  updateProfileName,
+} from './lib/api';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import { getQuestionsForMatch } from './data/questions';
 
@@ -531,7 +539,7 @@ function CloudflareBadge() {
   );
 }
 
-function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame, onCodegle }) {
+function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin, onLogout, onProfile, onAccountPlay, onPacks, onJoinGame, onCodegle }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -576,6 +584,7 @@ function Header({ accountName, canViewAdmin, onAdmin, onGuest, onCreate, onLogin
               <button className="menu-item" onClick={runAndClose(onJoinGame)}><Hash size={17} /><span><strong>Join PIN</strong><small>Enter a hosted game code</small></span></button>
               {accountName ? (
                 <>
+                  <button className="menu-item" onClick={runAndClose(onProfile)}><Settings size={17} /><span><strong>Profile & settings</strong><small>Change your battle name</small></span></button>
                   <button className="menu-item" onClick={runAndClose(onPacks)}><BookOpen size={17} /><span><strong>My packs</strong><small>Create and host questions</small></span></button>
                   {canViewAdmin && <button className="menu-item" onClick={runAndClose(onAdmin)}><BarChart3 size={17} /><span><strong>Analytics</strong><small>View Stemegle activity</small></span></button>}
                   <button className="menu-item menu-play" onClick={runAndClose(onAccountPlay)}><Rocket size={17} /><span><strong>Play now</strong><small>Find a live opponent</small></span></button>
@@ -727,6 +736,61 @@ function EntryModal({ mode, guestActionLabel = 'Find an opponent', guestDescript
         </form>
         <small className="privacy"><Lock size={12} /> {isGuest ? 'Guest progress lasts for this session.' : 'Passwords are protected by secure, server-side authentication.'}</small>
         {!isGuest && <button className="auth-switch" onClick={() => switchMode(isLogin ? 'create' : 'login')}>{isLogin ? 'New here? Create an account' : 'Already have an account? Log in'}</button>}
+      </div>
+    </div>
+  );
+}
+
+function ProfileSettingsModal({ accountName, onClose, onSave }) {
+  const dialogRef = useDialogA11y(onClose);
+  const [name, setName] = useState(accountName);
+  const [loading, setLoading] = useState(false);
+  const [savedName, setSavedName] = useState('');
+  const [error, setError] = useState('');
+  const normalizedName = name.trim().replace(/\s+/g, ' ');
+  const valid = normalizedName.length >= 2
+    && normalizedName.length <= 30
+    && Boolean(battleNameToAccountEmail(normalizedName));
+  const changed = normalizedName !== accountName;
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!valid || !changed || loading) return;
+    setLoading(true);
+    setError('');
+    setSavedName('');
+    try {
+      const result = await onSave(normalizedName);
+      setName(result.name);
+      setSavedName(result.name);
+    } catch (saveError) {
+      setError(saveError?.message || 'Your battle name could not be updated.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="entry-modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title" ref={dialogRef} tabIndex={-1}>
+        <button className="modal-close" onClick={onClose} aria-label="Close"><X size={20} /></button>
+        <span className="profile-avatar" aria-hidden="true">{playerInitial(savedName || normalizedName, 'Y')}</span>
+        <p className="eyebrow">PLAYER PROFILE</p>
+        <h2 id="profile-title">Profile & settings</h2>
+        <p>Choose the name other players see in matches and on the global leaderboard.</p>
+        <form onSubmit={submit}>
+          <label>
+            Battle name
+            <input autoFocus value={name} onChange={(event) => { setName(event.target.value); setSavedName(''); setError(''); }} maxLength={30} autoComplete="nickname" aria-describedby="profile-name-help" />
+          </label>
+          <p id="profile-name-help" className="profile-help"><Settings aria-hidden="true" /> 2–30 characters. Your password, score, rank, and saved packs stay the same.</p>
+          {error && <p className="auth-message error" role="alert">{error}</p>}
+          {savedName && <p className="auth-message success" role="status"><Check aria-hidden="true" /> Saved. Log in with <strong>{savedName}</strong> next time.</p>}
+          <button type="submit" className="button button-wide" disabled={!valid || !changed || loading}>
+            {loading ? 'Saving…' : savedName ? 'Saved' : 'Save changes'} {!loading && !savedName && <ArrowRight size={18} />}
+          </button>
+        </form>
+        <small className="privacy"><Lock size={12} /> Your account ID and match history never change.</small>
       </div>
     </div>
   );
@@ -2053,11 +2117,11 @@ function Results({ player, opponent, result, onRematch, onHome, onBackToParty, b
   );
 }
 
-function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onAccountPlay, onPacks, onJoinGame, onCodegle }) {
+function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPlayed, registeredUsers, leaders, onAdmin, onGuest, onParty, onCreate, onLogin, onLogout, onProfile, onAccountPlay, onPacks, onJoinGame, onCodegle }) {
   return (
     <div id="top">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onAccountPlay={onAccountPlay} onPacks={onPacks} onJoinGame={onJoinGame} onCodegle={onCodegle} />
+      <Header accountName={accountName} canViewAdmin={canViewAdmin} onAdmin={onAdmin} onGuest={onGuest} onCreate={onCreate} onLogin={onLogin} onLogout={onLogout} onProfile={onProfile} onAccountPlay={onAccountPlay} onPacks={onPacks} onJoinGame={onJoinGame} onCodegle={onCodegle} />
       <a className="leaderboard-fab" href="#leaderboard" aria-label={accountRank ? `View leaderboard. Your current rank is ${accountRank.rank_position}` : 'View the live global leaderboard'}>
         <span className="leaderboard-fab-icon"><Trophy aria-hidden="true" /></span>
         <span><small>{accountRank ? `YOUR RANK · #${accountRank.rank_position}` : 'LIVE GLOBAL RANKS'}</small><strong>{accountRank ? 'Climb even higher' : 'Can you take the top spot?'}</strong></span>
@@ -2163,9 +2227,10 @@ function Landing({ accountName, accountRank, canViewAdmin, onlineCount, gamesPla
 }
 
 export default function App() {
-  const { data: session, isPending: authPending } = authClient.useSession();
+  const { data: session, isPending: authPending, refetch: refetchSession } = authClient.useSession();
   const [screen, setScreen] = useState(() => window.location.pathname.startsWith('/admin') ? 'admin' : 'landing');
   const [modal, setModal] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [player, setPlayer] = useState('');
   const [opponent, setOpponent] = useState('');
   const [match, setMatch] = useState(null);
@@ -2324,6 +2389,7 @@ export default function App() {
     if (screen === 'game' || screen === 'party-game' || screen === 'codegle-game') return undefined;
     const renderAppState = () => JSON.stringify({
       mode: screen,
+      dialog: profileOpen ? 'profile-settings' : modal,
       player: player || null,
       opponent: opponent || null,
       matchId: match?.id ?? null,
@@ -2339,7 +2405,7 @@ export default function App() {
     return () => {
       if (window.render_game_to_text === renderAppState) delete window.render_game_to_text;
     };
-  }, [hostedPack?.title, match?.id, opponent, party.leaderId, party.players, partyCode, player, roomKind, screen]);
+  }, [hostedPack?.title, match?.id, modal, opponent, party.leaderId, party.players, partyCode, player, profileOpen, roomKind, screen]);
 
   useEffect(() => {
     let active = true;
@@ -2419,6 +2485,13 @@ export default function App() {
     window.history.replaceState(null, '', window.location.pathname);
   }
   function playAccount() { if (accountName) start(accountName); else setModal('login'); }
+  async function saveProfileName(name) {
+    const previousName = accountName;
+    const result = await updateProfileName(name);
+    setPlayer((current) => current === previousName ? result.name : current);
+    await refetchSession({ query: { disableCookieCache: true } });
+    return result;
+  }
   function playParty() {
     if (accountName) {
       start(accountName, 'party');
@@ -2511,7 +2584,7 @@ export default function App() {
     setMatch(null);
     setOpponent('');
   }
-  async function logout() { await authClient.signOut(); leaveParty(); home(); }
+  async function logout() { setProfileOpen(false); await authClient.signOut(); leaveParty(); home(); }
 
   const inParty = Boolean(partyCode && player);
   const showRoomPill = inParty
@@ -2531,7 +2604,7 @@ export default function App() {
   else if (screen === 'party-game' && match) content = <PartyGame key={match.id} player={player} game={match} onFinish={handlePartyFinish} onExit={() => setScreen(inParty ? (roomKind === 'pack' ? 'pack-room' : 'party') : 'landing')} />;
   else if (screen === 'game' && match) content = <Game player={player} match={match} onFinish={handleFinish} onExit={home} />;
   else if (screen === 'results' && result) content = <Results player={player} opponent={opponent} result={result} onRematch={rematch} onHome={home} onBackToParty={inParty ? () => setScreen(roomKind === 'pack' ? 'pack-room' : 'party') : undefined} backLabel={roomKind === 'pack' ? 'Back to game room' : 'Back to party'} />;
-  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onAccountPlay={playAccount} onPacks={openPacks} onJoinGame={openPinJoin} onCodegle={openCodegle} />;
+  else content = <Landing accountName={authReady ? accountName : ''} accountRank={accountRank} canViewAdmin={adminAccess} onlineCount={onlineCount} gamesPlayed={gamesPlayed} registeredUsers={registeredUsers} leaders={leaders} onAdmin={openAdmin} onGuest={playGuest} onParty={playParty} onCreate={() => setModal('create')} onLogin={() => setModal('login')} onLogout={logout} onProfile={() => { setModal(null); setProfileOpen(true); }} onAccountPlay={playAccount} onPacks={openPacks} onJoinGame={openPinJoin} onCodegle={openCodegle} />;
 
   const modalContent = modal && <EntryModal mode={modal} guestActionLabel={guestDestination === 'party' ? 'Continue to party' : guestDestination === 'pack-room' ? 'Join game' : guestDestination === 'codegle-matchmaking' ? 'Enter Codegle queue' : 'Find an opponent'} guestDescription={guestDestination === 'party' ? 'Pick a name so friends can recognize you in the party.' : guestDestination === 'pack-room' ? 'Pick a name so the host and other players can recognize you.' : guestDestination === 'codegle-matchmaking' ? 'Pick a name for the separate live coding queue.' : undefined} onClose={() => { setModal(null); if (guestDestination === 'party') pendingInvite.current = ''; }} onGuestStart={(name) => {
       const invite = guestDestination === 'party' ? pendingInvite.current : guestDestination === 'pack-room' ? (pendingJoinPin.current || pendingGameInvite.current) : '';
@@ -2548,6 +2621,7 @@ export default function App() {
   return <>
     {content}
     {modalContent}
+    {profileOpen && accountName && <ProfileSettingsModal accountName={accountName} onClose={() => setProfileOpen(false)} onSave={saveProfileName} />}
     {inParty && (screen === 'party' || screen === 'pack-room' || screen === 'party-game') && <ChatDock title={roomKind === 'pack' ? `Game ${partyCode}` : `Party ${partyCode}`} scopeLabel={roomKind === 'pack' ? 'players in this game' : 'your party'} messages={party.chat} onSend={party.sendChat} selfId={partyPlayerId.current} autoOpen={screen === 'party-game'} centered={screen === 'party-game'} />}
     {showRoomPill && <PartyPill code={partyCode} count={party.players.length} roomLabel={roomKind === 'pack' ? 'Game' : 'Party'} statusLabel={roomKind === 'pack' ? 'IN GAME ROOM' : 'IN PARTY'} onReturn={() => setScreen(roomKind === 'pack' ? 'pack-room' : 'party')} onLeave={() => setConfirmLeave(true)} />}
     {confirmLeave && <ConfirmDialog title={roomKind === 'pack' ? 'Leave the game room?' : 'Leave the party?'} message={roomKind === 'pack' ? "Are you sure you want to leave this hosted game? You'll need the PIN or invite link to rejoin." : "Are you sure you want to leave the party? You'll need the invite link or code to rejoin."} confirmLabel={roomKind === 'pack' ? 'Leave game' : 'Leave party'} onConfirm={leaveParty} onCancel={() => setConfirmLeave(false)} />}

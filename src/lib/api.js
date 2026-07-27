@@ -41,6 +41,13 @@ export function fetchStats() {
   return request('/api/stats');
 }
 
+export function updateProfileName(name) {
+  return request('/api/profile', {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function recordBotMatch(matchId) {
   if (!matchId) return null;
   return request('/api/matches/bot', {

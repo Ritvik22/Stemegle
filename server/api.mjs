@@ -1,10 +1,11 @@
 import { fromNodeHeaders } from 'better-auth/node';
 import { Router, raw } from 'express';
-import { auth } from './auth.mjs';
+import { auth, normalizeBattleName } from './auth.mjs';
 import { getAnalyticsDashboard, ingestAnalyticsRequest } from './analytics.mjs';
 import { executeCode } from './code-runner-client.mjs';
 import { codegleTests } from './codegle-tests.mjs';
 import { pool, withTransaction } from './db.mjs';
+import { battleNameToAccountEmail, isSyntheticAccountEmail } from '../src/lib/accountIdentity.js';
 import {
   CODEGLE_DIFFICULTY_IDS, CODEGLE_LANGUAGES, getCodegleProblem,
 } from '../src/data/codegleProblems.js';
@@ -111,6 +112,17 @@ function validMatchParticipant(matchId, playerId) {
 
 function validMatchTicket(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+export function normalizeProfileNameInput(value) {
+  const name = normalizeBattleName(value?.name);
+  return name && battleNameToAccountEmail(name) ? name : null;
+}
+
+export function profileLoginEmail(currentEmail, name) {
+  return isSyntheticAccountEmail(currentEmail)
+    ? battleNameToAccountEmail(name)
+    : currentEmail;
 }
 
 export function normalizeCodegleRunInput(value) {
@@ -246,6 +258,53 @@ export function createApiRouter({
         accountRank: normalizeRank(accountRank.rows[0]),
       });
     } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/profile', requireOrigin, async (req, res, next) => {
+    const session = await getSession(req);
+    if (!session?.user?.id) {
+      res.status(401).json({ error: 'Log in to change your battle name.' });
+      return;
+    }
+    if (!allowRequest(req, `profile-update:${session.user.id}`, 6)) {
+      res.status(429).json({ error: 'Too many profile changes. Pause briefly and try again.' });
+      return;
+    }
+    const name = normalizeProfileNameInput(req.body);
+    if (!name) {
+      res.status(400).json({ error: 'Battle names must contain 2 to 30 valid characters.' });
+      return;
+    }
+    const email = profileLoginEmail(session.user.email, name);
+    try {
+      const conflict = await pool.query(
+        'select 1 from app_users where lower(name) = lower($1) and id <> $2 limit 1',
+        [name, session.user.id],
+      );
+      if (conflict.rowCount) {
+        res.status(409).json({ error: 'That battle name is already taken.' });
+        return;
+      }
+      const updated = await pool.query(
+        `update app_users
+         set name = $1, email = $2, updated_at = now()
+         where id = $3
+         returning name`,
+        [name, email, session.user.id],
+      );
+      if (!updated.rowCount) {
+        res.status(404).json({ error: 'Account not found.' });
+        return;
+      }
+      notifyStats();
+      res.json({ name: updated.rows[0].name });
+    } catch (error) {
+      if (error?.code === '23505') {
+        res.status(409).json({ error: 'That battle name is already taken.' });
+        return;
+      }
       next(error);
     }
   });
