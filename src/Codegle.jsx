@@ -17,6 +17,7 @@ import {
   CODEGLE_DIFFICULTIES, CODEGLE_LANGUAGES, getCodegleProblem, getCodegleProblemForMatch,
 } from './data/codegleProblems';
 import { trackAnalyticsEvent } from './lib/analytics';
+import { codeShapeFromSource, isCodeShape } from './lib/codeShape';
 
 const CODEGLE_PRESENCE = 'stemegle:codegle:presence:v1';
 const CODEGLE_MATCH_PREFIX = 'stemegle:codegle:match:';
@@ -30,6 +31,13 @@ function playerId() {
 const languageExtension = {
   python: python(), java: java(), cpp: cpp(), javascript: javascript(),
 };
+
+const BOT_CODE_SHAPE = [
+  { indent: 0, width: 8 }, { indent: 1, width: 5 }, { indent: 1, width: 9 },
+  { indent: 2, width: 4 }, { indent: 1, width: 0 }, { indent: 1, width: 7 },
+  { indent: 2, width: 10 }, { indent: 2, width: 5 }, { indent: 1, width: 3 },
+  { indent: 0, width: 0 }, { indent: 0, width: 6 }, { indent: 0, width: 4 },
+];
 
 function difficultyLabel(difficulty) {
   return CODEGLE_DIFFICULTIES.find(({ id }) => id === difficulty)?.label || 'Beginner';
@@ -57,6 +65,31 @@ function useCodeglePopulations() {
   }, []);
 
   return populations;
+}
+
+function OpponentCodeSilhouette({ lines, name, isBot }) {
+  const visibleLines = lines.slice(-8);
+  const offset = Math.max(0, lines.length - visibleLines.length);
+  const nonBlankLines = lines.filter((line) => line.width > 0).length;
+  const latestVisibleIndex = visibleLines.findLastIndex((line) => line.width > 0);
+  return (
+    <section className="codegle-rival-code" aria-label={`${name}'s hidden code progress`}>
+      <header>
+        <span><Braces /> {name}{isBot ? ' · BOT' : ''}</span>
+        <small><i /> LIVE PROGRESS</small>
+      </header>
+      <div className="codegle-rival-screen" aria-hidden="true">
+        {visibleLines.length ? visibleLines.map((line, index) => (
+          <span
+            className={`${line.width === 0 ? 'blank' : ''}${index === latestVisibleIndex ? ' active' : ''}`}
+            key={`${offset + index}-${line.indent}-${line.width}`}
+            style={{ '--line-indent': line.indent, '--line-width': line.width }}
+          />
+        )) : <><span /><span className="waiting" /><span /></>}
+      </div>
+      <footer><strong>{nonBlankLines} {nonBlankLines === 1 ? 'line' : 'lines'} forming</strong><small>SOURCE HIDDEN · SHAPE ONLY</small></footer>
+    </section>
+  );
 }
 
 export function CodegleIntro({ onBack, onPlay }) {
@@ -329,9 +362,17 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
   const [running, setRunning] = useState(false);
   const [verdict, setVerdict] = useState(null);
   const [winner, setWinner] = useState(null);
+  const [opponentCodeShape, setOpponentCodeShape] = useState([]);
   const [countdown, setCountdown] = useState(Math.max(0, Math.ceil((match.startsAt - Date.now()) / 1000)));
   const [elapsed, setElapsed] = useState(0);
   const finishedRef = useRef(false);
+  const ownCodeShape = useMemo(() => codeShapeFromSource(sources[language]), [language, sources]);
+  const displayedOpponentShape = useMemo(() => {
+    if (!match.isBot) return opponentCodeShape;
+    const duration = Math.max(1, match.botSolvesAt - match.startsAt);
+    const progress = Math.max(0, Math.min(1, elapsed / duration));
+    return BOT_CODE_SHAPE.slice(0, Math.max(1, Math.ceil(progress * BOT_CODE_SHAPE.length)));
+  }, [elapsed, match.botSolvesAt, match.isBot, match.startsAt, opponentCodeShape]);
 
   const finish = useCallback((solved) => {
     if (finishedRef.current) return;
@@ -382,12 +423,44 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     return () => clearInterval(timer);
   }, [match.startsAt]);
 
+  useEffect(() => {
+    if (match.isBot) return undefined;
+    match.channel.on('broadcast', { event: 'code-progress' }, ({ payload }) => {
+      if (payload?.playerId === match.opponent.id && isCodeShape(payload.lines)) {
+        setOpponentCodeShape(payload.lines);
+      }
+    });
+    return undefined;
+  }, [match.channel, match.isBot, match.opponent.id]);
+
+  useEffect(() => {
+    if (match.isBot) return undefined;
+    const publish = () => {
+      void match.channel.send({
+        type: 'broadcast',
+        event: 'code-progress',
+        payload: { playerId: match.playerId, lines: ownCodeShape },
+      });
+    };
+    const initialTimer = setTimeout(publish, 250);
+    const heartbeat = setInterval(publish, 3000);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(heartbeat);
+    };
+  }, [match.channel, match.isBot, match.playerId, ownCodeShape]);
+
   useLayoutEffect(() => {
     const render = () => JSON.stringify({
       mode: 'codegle-game', difficulty: match.difficulty, problem: problem.id, language, submitting,
       verdict: verdict?.status || null, elapsedMs: elapsed,
       player, opponent: match.opponent.name, opponentType: match.isBot ? 'bot' : 'human',
       botKind: match.botKind || null, winner: winner?.playerId || null,
+      opponentCode: {
+        sourceHidden: true,
+        lines: displayedOpponentShape,
+        nonBlankLines: displayedOpponentShape.filter((line) => line.width > 0).length,
+      },
       testConsole: {
         open: testOpen, running, status: testResult?.status || null,
         message: testResult?.message || null,
@@ -396,7 +469,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     });
     window.render_game_to_text = render;
     return () => { if (window.render_game_to_text === render) delete window.render_game_to_text; };
-  }, [elapsed, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, running, submitting, testOpen, testResult, verdict, winner]);
+  }, [displayedOpponentShape, elapsed, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, running, submitting, testOpen, testResult, verdict, winner]);
 
   async function runTest() {
     if (running || submitting || countdown || winner) return;
@@ -460,6 +533,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
       <div className="codegle-workspace">
         <aside className="codegle-problem">
           <div className="codegle-problem-top"><span>{difficultyLabel(problem.difficulty)}</span><small>{match.isBot ? 'BOT RACE · FIRST ACCEPTED WINS' : 'ONE PROBLEM · FIRST ACCEPTED WINS'}</small></div>
+          <OpponentCodeSilhouette lines={displayedOpponentShape} name={match.opponent.name} isBot={match.isBot} />
           <h1>{problem.title}</h1>
           <p>{problem.description}</p>
           <h2>Input</h2><p>{problem.inputFormat}</p>

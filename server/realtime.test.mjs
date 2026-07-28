@@ -463,6 +463,34 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
     assert.equal(hostTicket.ranked, false);
     assert.equal(guestTicket.ranked, false);
 
+    host.send({
+      type: 'broadcast', ref: 'host-code-progress', channelId: 'codegle-a', event: 'code-progress',
+      payload: {
+        playerId: 'code-player-a',
+        lines: [{ indent: 0, width: 7 }, { indent: 1, width: 4 }],
+      },
+    });
+    await host.next((message) => message.type === 'ack' && message.ref === 'host-code-progress');
+    const codeProgress = await guest.next(
+      (message) => message.type === 'broadcast' && message.event === 'code-progress',
+    );
+    assert.deepEqual(codeProgress.payload, {
+      playerId: 'code-player-a',
+      lines: [{ indent: 0, width: 7 }, { indent: 1, width: 4 }],
+    });
+
+    guest.send({
+      type: 'broadcast', ref: 'leaked-code-progress', channelId: 'codegle-b', event: 'code-progress',
+      payload: {
+        playerId: 'code-player-b',
+        lines: [{ indent: 0, width: 4, source: 'print(secret)' }],
+      },
+    });
+    assert.equal(
+      (await guest.next((message) => message.ref === 'leaked-code-progress')).code,
+      'forbidden_sender',
+    );
+
     guest.send({
       type: 'broadcast', ref: 'guest-codegle-start', channelId: 'codegle-b', event: 'start',
       payload: { startsAt: Date.now() + 700, problemId: getCodegleProblemForMatch(matchId, difficulty).id },

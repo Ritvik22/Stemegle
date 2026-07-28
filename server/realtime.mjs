@@ -6,6 +6,7 @@ import {
   CODEGLE_DIFFICULTY_IDS,
   getCodegleProblemForMatch,
 } from '../src/data/codegleProblems.js';
+import { isCodeShape, MAX_CODE_SHAPE_LINES } from '../src/lib/codeShape.js';
 
 export const REALTIME_PATH = '/api/realtime';
 export const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -35,7 +36,7 @@ const CODEGLE_BOT_BASE_MS = {
   fallback: { beginner: 45_000, intermediate: 70_000, advanced: 95_000 },
 };
 const MATCH_EVENTS = new Set(['ready', 'start', 'answer', 'score', 'finish', 'chat']);
-const CODEGLE_MATCH_EVENTS = new Set(['ready', 'start', 'chat']);
+const CODEGLE_MATCH_EVENTS = new Set(['ready', 'start', 'chat', 'code-progress']);
 const PARTY_EVENTS = new Set([
   'party-start',
   'party-answer',
@@ -203,6 +204,17 @@ function validateChatPayload(state, payload) {
   if (payload.name !== undefined
     && (typeof payload.name !== 'string' || !payload.name.trim() || payload.name.length > 64)) {
     return 'Chat name must be between 1 and 64 characters.';
+  }
+  return null;
+}
+
+function validateCodeProgressPayload(state, payload) {
+  if (payload.playerId !== state.presenceKey) return 'Code progress playerId must match the sender.';
+  if (!Array.isArray(payload.lines) || payload.lines.length > MAX_CODE_SHAPE_LINES) {
+    return `Code progress must contain at most ${MAX_CODE_SHAPE_LINES} lines.`;
+  }
+  if (!isCodeShape(payload.lines)) {
+    return 'Code progress lines must contain only valid width and indent buckets.';
   }
   return null;
 }
@@ -529,6 +541,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
           return null;
         }
         if (event === 'chat') return validateChatPayload(state, payload);
+        if (event === 'code-progress') return validateCodeProgressPayload(state, payload);
         if (event === 'ready' && payload.playerId !== state.presenceKey) {
           return 'Ready playerId must match the sender.';
         }
