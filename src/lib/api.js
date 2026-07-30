@@ -145,3 +145,14 @@ export function submitCodegleSolution({ matchId, playerId, ticket, language, sou
     body: JSON.stringify({ matchId, playerId, ticket, language, source }),
   });
 }
+
+export function revealCodegleHint({
+  matchId, playerId, ticket, hintIndex,
+}) {
+  return request('/api/codegle/hint', {
+    method: 'POST',
+    body: JSON.stringify({
+      matchId, playerId, ticket, hintIndex,
+    }),
+  });
+}

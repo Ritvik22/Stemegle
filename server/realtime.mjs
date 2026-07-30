@@ -7,6 +7,7 @@ import {
   getCodegleProblemForMatch,
 } from '../src/data/codegleProblems.js';
 import { isCodeShape, MAX_CODE_SHAPE_LINES } from '../src/lib/codeShape.js';
+import { CODEGLE_HINT_PENALTY_MS } from './codegle-hints.mjs';
 
 export const REALTIME_PATH = '/api/realtime';
 export const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -677,6 +678,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
           ...baseRun,
           problemId: message.payload.problemId,
           winner: null,
+          hintsByPlayer: new Map(participants.map((participant) => [participant, new Set()])),
         } : {
           ...baseRun,
           questionCount: message.payload.questions.length,
@@ -959,7 +961,34 @@ export function attachRealtimeServer(httpServer, options = {}) {
       botName: run.botName || null,
       botSolvesAt: run.botSolvesAt || null,
       botKind: run.botKind || null,
+      hintsUsed: run.hintsByPlayer?.get(playerId)?.size || 0,
       winner: run.winner ? { ...run.winner } : null,
+    };
+  }
+
+  function claimCodegleHint({
+    ticket, matchId, playerId, hintIndex, hintCount,
+  }) {
+    const authorization = verifyCodegleTicket({ ticket, matchId, playerId });
+    if (!authorization) return authorization;
+    if (authorization.winner) return { winner: authorization.winner };
+    if (!Number.isInteger(hintIndex)
+      || !Number.isInteger(hintCount)
+      || hintCount < 1
+      || hintIndex < 0
+      || hintIndex >= hintCount) return null;
+    const run = matchRuns.get(matchId);
+    if (Date.now() < run.startsAt) return null;
+    if (!run.hintsByPlayer) {
+      run.hintsByPlayer = new Map(run.participants.map((participant) => [participant, new Set()]));
+    }
+    const revealed = run.hintsByPlayer.get(playerId);
+    if (!revealed) return null;
+    revealed.add(hintIndex);
+    return {
+      hintIndex,
+      hintsUsed: revealed.size,
+      penaltyMs: revealed.size * CODEGLE_HINT_PENALTY_MS,
     };
   }
 
@@ -977,10 +1006,14 @@ export function attachRealtimeServer(httpServer, options = {}) {
     if (!run.winner) {
       const solvedAt = Date.now();
       if (solvedAt < run.startsAt) return null;
+      const hintsUsed = run.hintsByPlayer?.get(playerId)?.size || 0;
+      const penaltyMs = hintsUsed * CODEGLE_HINT_PENALTY_MS;
       run.winner = {
         playerId,
         solvedAt,
-        elapsedMs: solvedAt - run.startsAt,
+        elapsedMs: solvedAt - run.startsAt + penaltyMs,
+        penaltyMs,
+        hintsUsed,
       };
       if (run.topic) {
         broadcastTopic(run.topic, {
@@ -1028,6 +1061,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
       expiresAt,
       problemId: problem.id,
       winner: null,
+      hintsByPlayer: new Map(participants.map((participant) => [participant, new Set()])),
       botId,
       botName,
       botSolvesAt,
@@ -1098,6 +1132,7 @@ export function attachRealtimeServer(httpServer, options = {}) {
     getConnectionCount: () => connectionCount,
     verifyMatchTicket,
     verifyCodegleTicket,
+    claimCodegleHint,
     markCodegleSolved,
     createCodegleBotMatch,
     markCodegleBotSolved,

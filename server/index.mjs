@@ -173,6 +173,7 @@ export function createBackendRuntime(options = {}) {
     notifyStats: () => realtime.publishDatabaseChange({ table: 'matches', event: 'INSERT' }),
     verifyMatchTicket: (ticket) => realtime.verifyMatchTicket(ticket),
     verifyCodegleTicket: (ticket) => realtime.verifyCodegleTicket(ticket),
+    claimCodegleHint: (ticket) => realtime.claimCodegleHint(ticket),
     markCodegleSolved: (ticket) => realtime.markCodegleSolved(ticket),
     createCodegleBotMatch: (options) => realtime.createCodegleBotMatch(options),
     markCodegleBotSolved: (ticket) => realtime.markCodegleBotSolved(ticket),

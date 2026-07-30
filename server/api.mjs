@@ -4,6 +4,7 @@ import { auth, normalizeBattleName } from './auth.mjs';
 import { getAnalyticsDashboard, ingestAnalyticsRequest } from './analytics.mjs';
 import { executeCode } from './code-runner-client.mjs';
 import { codegleTests } from './codegle-tests.mjs';
+import { CODEGLE_HINT_PENALTY_MS, codegleHints } from './codegle-hints.mjs';
 import { pool, withTransaction } from './db.mjs';
 import { battleNameToAccountEmail, isSyntheticAccountEmail } from '../src/lib/accountIdentity.js';
 import {
@@ -214,6 +215,7 @@ export function createApiRouter({
   notifyStats = () => {},
   verifyMatchTicket = () => false,
   verifyCodegleTicket = () => false,
+  claimCodegleHint = () => false,
   markCodegleSolved = () => false,
   createCodegleBotMatch = () => null,
   markCodegleBotSolved = () => false,
@@ -532,6 +534,57 @@ export function createApiRouter({
     } catch (error) {
       next(error);
     }
+  });
+
+  router.post('/codegle/hint', requireOrigin, (req, res) => {
+    if (!allowRequest(req, 'codegle-hint', 20)) {
+      res.status(429).json({ error: 'Too many hint requests. Pause briefly and try again.' });
+      return;
+    }
+    const matchId = req.body?.matchId;
+    const playerId = req.body?.playerId;
+    const ticket = req.body?.ticket;
+    const hintIndex = req.body?.hintIndex;
+    if (!validMatchId(matchId)
+      || !validMatchParticipant(matchId, playerId)
+      || !validMatchTicket(ticket)
+      || !Number.isInteger(hintIndex)) {
+      res.status(400).json({ error: 'Invalid Codegle hint request' });
+      return;
+    }
+    const authorization = verifyCodegleTicket({ ticket, matchId, playerId });
+    if (!authorization) {
+      res.status(403).json({ error: 'This Codegle match is not authorized' });
+      return;
+    }
+    if (authorization.winner) {
+      res.status(409).json({ error: 'This Codegle match already has a winner', winner: authorization.winner });
+      return;
+    }
+    const hints = codegleHints(authorization.problemId);
+    if (!hints[hintIndex]) {
+      res.status(400).json({ error: 'That hint is unavailable' });
+      return;
+    }
+    const claimed = claimCodegleHint({
+      ticket, matchId, playerId, hintIndex, hintCount: hints.length,
+    });
+    if (!claimed) {
+      res.status(409).json({ error: 'The hint could not be revealed yet' });
+      return;
+    }
+    if (claimed.winner) {
+      res.status(409).json({ error: 'This Codegle match already has a winner', winner: claimed.winner });
+      return;
+    }
+    res.json({
+      hint: hints[hintIndex],
+      hintIndex,
+      hintsUsed: claimed.hintsUsed,
+      penaltyMs: claimed.penaltyMs,
+      penaltyPerHintMs: CODEGLE_HINT_PENALTY_MS,
+      totalHints: hints.length,
+    });
   });
 
   router.post('/codegle/run', requireOrigin, async (req, res, next) => {

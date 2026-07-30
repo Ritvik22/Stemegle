@@ -7,10 +7,11 @@ import { javascript } from '@codemirror/lang-javascript';
 import { vscodeDark } from '@uiw/codemirror-theme-vscode';
 import {
   ArrowLeft, ArrowRight, Bot, Braces, Check, Clock3, Code2, Cpu, FlaskConical, Gauge,
-  LoaderCircle, Play, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
+  Lightbulb, LoaderCircle, Play, RotateCcw, Send, Sparkles, Terminal, Trophy, Users, X,
 } from 'lucide-react';
 import {
-  finishCodegleBotMatch, runCodegleProgram, startCodegleBotMatch, submitCodegleSolution,
+  finishCodegleBotMatch, revealCodegleHint, runCodegleProgram, startCodegleBotMatch,
+  submitCodegleSolution,
 } from './lib/api';
 import { getPresencePlayers, hasRealtimeConfig, realtime } from './lib/realtime';
 import {
@@ -363,10 +364,16 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
   const [verdict, setVerdict] = useState(null);
   const [winner, setWinner] = useState(null);
   const [opponentCodeShape, setOpponentCodeShape] = useState([]);
+  const [revealedHints, setRevealedHints] = useState([]);
+  const [hintPenaltyMs, setHintPenaltyMs] = useState(0);
+  const [totalHints, setTotalHints] = useState(null);
+  const [hintLoading, setHintLoading] = useState(false);
+  const [hintError, setHintError] = useState('');
   const [countdown, setCountdown] = useState(Math.max(0, Math.ceil((match.startsAt - Date.now()) / 1000)));
   const [elapsed, setElapsed] = useState(0);
   const finishedRef = useRef(false);
   const ownCodeShape = useMemo(() => codeShapeFromSource(sources[language]), [language, sources]);
+  const adjustedElapsed = elapsed + hintPenaltyMs;
   const displayedOpponentShape = useMemo(() => {
     if (!match.isBot) return opponentCodeShape;
     const duration = Math.max(1, match.botSolvesAt - match.startsAt);
@@ -382,6 +389,7 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     setTimeout(() => onFinish({
       type: 'codegle', won, winnerName: won ? player : match.opponent.name,
       opponentName: match.opponent.name, elapsedMs: solved.elapsedMs,
+      penaltyMs: solved.penaltyMs || 0, hintsUsed: solved.hintsUsed || 0,
       difficulty: match.difficulty, vsBot: Boolean(match.isBot), botKind: match.botKind || null,
     }), 1100);
   }, [match.botKind, match.difficulty, match.isBot, match.opponent.name, match.playerId, onFinish, player]);
@@ -453,7 +461,14 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
   useLayoutEffect(() => {
     const render = () => JSON.stringify({
       mode: 'codegle-game', difficulty: match.difficulty, problem: problem.id, language, submitting,
-      verdict: verdict?.status || null, elapsedMs: elapsed,
+      verdict: verdict?.status || null, elapsedMs: adjustedElapsed,
+      hints: {
+        revealed: revealedHints.length,
+        total: totalHints,
+        penaltyMs: hintPenaltyMs,
+        loading: hintLoading,
+        error: hintError || null,
+      },
       player, opponent: match.opponent.name, opponentType: match.isBot ? 'bot' : 'human',
       botKind: match.botKind || null, winner: winner?.playerId || null,
       opponentCode: {
@@ -469,7 +484,36 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
     });
     window.render_game_to_text = render;
     return () => { if (window.render_game_to_text === render) delete window.render_game_to_text; };
-  }, [displayedOpponentShape, elapsed, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, running, submitting, testOpen, testResult, verdict, winner]);
+  }, [adjustedElapsed, displayedOpponentShape, hintError, hintLoading, hintPenaltyMs, language, match.botKind, match.difficulty, match.isBot, match.opponent.name, player, problem.id, revealedHints.length, running, submitting, testOpen, testResult, totalHints, verdict, winner]);
+
+  async function revealHint() {
+    if (hintLoading || countdown || winner || (totalHints !== null && revealedHints.length >= totalHints)) return;
+    const authorization = match.getAuthorization?.();
+    if (!authorization?.ticket) {
+      setHintError('Match authorization is still connecting. Try again.');
+      return;
+    }
+    setHintLoading(true);
+    setHintError('');
+    try {
+      const result = await revealCodegleHint({
+        matchId: match.id,
+        playerId: match.playerId,
+        ticket: authorization.ticket,
+        hintIndex: revealedHints.length,
+      });
+      setRevealedHints((current) => (
+        current[result.hintIndex] ? current : [...current, result.hint]
+      ));
+      setHintPenaltyMs(result.penaltyMs);
+      setTotalHints(result.totalHints);
+    } catch (error) {
+      if (error.details?.winner) finish(error.details.winner);
+      else setHintError(error.message || 'Could not reveal the hint.');
+    } finally {
+      setHintLoading(false);
+    }
+  }
 
   async function runTest() {
     if (running || submitting || countdown || winner) return;
@@ -528,12 +572,39 @@ export function CodegleGame({ player, match, onFinish, onExit }) {
         <button onClick={onExit} aria-label="Exit Codegle"><ArrowLeft /></button>
         <strong><Code2 /> codegle <small>BETA</small></strong>
         <div><span>{player}</span><b>VS</b><span>{match.opponent.name}{match.isBot && <small className="codegle-bot-label"><Bot /> BOT</small>}</span></div>
-        <time><Clock3 /> {Math.floor(elapsed / 60000)}:{String(Math.floor(elapsed / 1000) % 60).padStart(2, '0')}</time>
+        <time>
+          <Clock3 />
+          <span>{Math.floor(adjustedElapsed / 60000)}:{String(Math.floor(adjustedElapsed / 1000) % 60).padStart(2, '0')}</span>
+          {hintPenaltyMs > 0 && <small>+{hintPenaltyMs / 1000}s hints</small>}
+        </time>
       </header>
       <div className="codegle-workspace">
         <aside className="codegle-problem">
           <div className="codegle-problem-top"><span>{difficultyLabel(problem.difficulty)}</span><small>{match.isBot ? 'BOT RACE · FIRST ACCEPTED WINS' : 'ONE PROBLEM · FIRST ACCEPTED WINS'}</small></div>
           <OpponentCodeSilhouette lines={displayedOpponentShape} name={match.opponent.name} isBot={match.isBot} />
+          <section className="codegle-hints" aria-labelledby="codegle-hints-title">
+            <header>
+              <span><Lightbulb /><strong id="codegle-hints-title">Need a nudge?</strong></span>
+              <small>+10 seconds each</small>
+            </header>
+            {revealedHints.map((hint, index) => (
+              <p className="codegle-hint" key={hint}><b>HINT {index + 1}</b>{hint}</p>
+            ))}
+            <button
+              type="button"
+              onClick={revealHint}
+              disabled={hintLoading || countdown > 0 || Boolean(winner) || (totalHints !== null && revealedHints.length >= totalHints)}
+            >
+              {hintLoading ? <LoaderCircle className="upload-spin" /> : <Lightbulb />}
+              {hintLoading
+                ? 'Revealing…'
+                : totalHints !== null && revealedHints.length >= totalHints
+                  ? 'All hints revealed'
+                  : `Reveal hint ${revealedHints.length + 1}`}
+              {!hintLoading && (totalHints === null || revealedHints.length < totalHints) && <em>+10s</em>}
+            </button>
+            {hintError && <small className="codegle-hint-error" role="alert">{hintError}</small>}
+          </section>
           <h1>{problem.title}</h1>
           <p>{problem.description}</p>
           <h2>Input</h2><p>{problem.inputFormat}</p>
@@ -598,6 +669,7 @@ export function CodegleResults({ result, onRematch, onHome }) {
       <h1>{result.won ? 'You compiled the win.' : `${result.winnerName} solved it first.`}</h1>
       <p>{result.won ? 'All hidden tests passed before your opponent.' : 'Refactor, resubmit, and take the next race.'}</p>
       <div className="codegle-result-stat"><Clock3 /><span><small>WINNING TIME</small><strong>{(result.elapsedMs / 1000).toFixed(1)} seconds</strong></span></div>
+      {result.hintsUsed > 0 && <small className="codegle-result-penalty"><Lightbulb /> Includes +{result.penaltyMs / 1000}s from {result.hintsUsed} {result.hintsUsed === 1 ? 'hint' : 'hints'}.</small>}
       <small className="codegle-count-note"><Check /> {result.vsBot ? 'This clearly labeled bot race counts' : 'Codegle matches count'} toward matches completed all time.</small>
       <div><button className="button codegle-primary" onClick={onRematch}><RotateCcw /> Race again</button><button className="button button-secondary" onClick={onHome}>Back to Stemegle <ArrowRight /></button></div>
     </main>

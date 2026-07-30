@@ -520,10 +520,37 @@ test('Codegle uses isolated topics, host-controlled starts, and a server-decided
     assert.equal(authorization.winner, null);
 
     await new Promise((resolve) => setTimeout(resolve, Math.max(0, startsAt - Date.now() + 10)));
+    const firstHint = fixture.realtime.claimCodegleHint({
+      ticket: guestTicket.ticket,
+      matchId,
+      playerId: 'code-player-b',
+      hintIndex: 0,
+      hintCount: 2,
+    });
+    assert.deepEqual(firstHint, { hintIndex: 0, hintsUsed: 1, penaltyMs: 10_000 });
+    const duplicateHint = fixture.realtime.claimCodegleHint({
+      ticket: guestTicket.ticket,
+      matchId,
+      playerId: 'code-player-b',
+      hintIndex: 0,
+      hintCount: 2,
+    });
+    assert.deepEqual(duplicateHint, firstHint, 'repeated hint requests must not add another penalty');
+    const secondHint = fixture.realtime.claimCodegleHint({
+      ticket: guestTicket.ticket,
+      matchId,
+      playerId: 'code-player-b',
+      hintIndex: 1,
+      hintCount: 2,
+    });
+    assert.deepEqual(secondHint, { hintIndex: 1, hintsUsed: 2, penaltyMs: 20_000 });
     const winner = fixture.realtime.markCodegleSolved({
       ticket: guestTicket.ticket, matchId, playerId: 'code-player-b',
     });
     assert.equal(winner.playerId, 'code-player-b');
+    assert.equal(winner.hintsUsed, 2);
+    assert.equal(winner.penaltyMs, 20_000);
+    assert.ok(winner.elapsedMs >= 20_000);
     const hostSolved = await host.next((message) => message.type === 'broadcast' && message.event === 'solved');
     assert.equal(hostSolved.payload.playerId, 'code-player-b');
     const later = fixture.realtime.markCodegleSolved({
